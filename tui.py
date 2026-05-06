@@ -259,12 +259,12 @@ class VADLoop:
             if rms > threshold:
                 is_speech = True
 
-            # ── State machine ─────────────────────────────────────────
-            # Debug log every 5th iteration
-            if getattr(self, '_debug_ctr', 0) % 5 == 0:
-                log(f"  VAD chunk: RMS={rms:.0f} threshold={threshold}, is_speech={is_speech}, "
-                    f"speech_buf={len(speech_buffer)//64}f")
-            self._debug_ctr = getattr(self, '_debug_ctr', 0) + 1
+            # ── Debug: log every iteration (chunk stats) ─────────────
+            chunk_bytes = len(chunk_data)
+            debug_msg = (f"  chunk={chunk_bytes}B rms={rms:.0f} thr={threshold} "
+                         f"vad={is_speech} buf={len(speech_buffer)//64}f "
+                         f"speak={is_speaking} silence={silence_frames}")
+            print(debug_msg)  # not log() — always visible, no \r overwrite
 
             if is_speech:
                 speech_frames += 1
