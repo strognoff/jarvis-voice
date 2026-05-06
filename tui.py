@@ -574,21 +574,21 @@ def test_mic_vad():
     else:
         return True, f"VAD working correctly ({pct:.1f}% speech detected)."
 
-def test_mic(duration=1.0, out_path='/data/data/com.termux/files/home/jarvis-voice/mic_test.m4a'):
-    """Quick mic test — records `duration` seconds and checks if file is created."""
+def test_mic(duration=3.0, out_path='/data/data/com.termux/files/home/jarvis-voice/mic_test.m4a'):
+    """Quick mic test — records `duration` seconds, checks file, plays it back."""
     out = Path(out_path)
     if out.exists():
         out.unlink()
 
-    print(f"🎤 Recording {duration}s...")
-
-    proc = subprocess.Popen(
-        ['termux-microphone-record', '-f', str(out), '-d'],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-    )
-    time.sleep(duration)
-    proc.terminate()
-    proc.wait()
+    print(f"🎤 Recording {duration}s... (speak clearly)")
+    with _recording_lock:
+        proc = subprocess.Popen(
+            ['termux-microphone-record', '-f', str(out), '-d'],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+        time.sleep(duration)
+        proc.terminate()
+        proc.wait()
 
     if not out.exists():
         print(f"❌ FAIL — file not created: {out}")
@@ -597,11 +597,21 @@ def test_mic(duration=1.0, out_path='/data/data/com.termux/files/home/jarvis-voi
         return False
 
     size = out.stat().st_size
-    if size < 100:
+    if size < 1000:
         print(f"❌ FAIL — file too small ({size} bytes), likely empty recording")
         return False
 
     print(f"✅ Mic working! File: {out} ({size} bytes)")
+
+    # Play back the recording
+    print(f"🔊 Playing back recording for {duration}s...")
+    play_result = subprocess.run(
+        ['termux-media-player', 'play', str(out)],
+        capture_output=True, timeout=int(duration + 5)
+    )
+    if play_result.returncode != 0:
+        print(f"⚠️  Playback failed (termux-media-player returned {play_result.returncode})")
+        print(f"   Audio was recorded and saved to {out}")
 
     # Quick ffprobe check
     probe = subprocess.run(
@@ -628,7 +638,7 @@ if __name__ == "__main__":
             # Legacy mic test
             import argparse
             parser = argparse.ArgumentParser(description=f"Jarvis Voice TUI v{__version__} — mic test")
-            parser.add_argument("-d", "--duration", type=float, default=1.0)
+            parser.add_argument("-d", "--duration", type=float, default=3.0)
             parser.add_argument("-f", "--file", default="/data/data/com.termux/files/home/jarvis-voice/mic_test.m4a")
             args, _ = parser.parse_known_args()
             ok = test_mic(duration=args.duration, out_path=args.file)
