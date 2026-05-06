@@ -204,8 +204,8 @@ class VADLoop:
         threshold = ENERGY_THRESHOLD  # local alias, avoids late binding issues in loops
 
         while self.running:
-            # ── Record a ~500ms chunk ────────────────────────────────
-            # Remove old chunk file first
+            # ── S1: Remove old chunk file first ────────────────────
+            print("[vad] S1 cleanup old files", flush=True)
             if chunk_file.exists():
                 try:
                     os.remove(chunk_file)
@@ -217,18 +217,22 @@ class VADLoop:
                 except Exception:
                     pass
 
-            # Start recording (no -d flag — record until we kill it)
+            # ── S2: Start recording ───────────────────────────────
+            print("[vad] S2 starting mic record", flush=True)
             record_proc = subprocess.Popen(
                 ['termux-microphone-record', '-f', str(chunk_file)],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
             )
+            print("[vad] S3 recording... (600ms)", flush=True)
             time.sleep(0.6)  # record for ~600ms
             # Kill hard — sigkill ensures process dies immediately
+            print("[vad] S4 killing record process", flush=True)
             record_proc.kill()
             try:
                 record_proc.wait()
             except Exception:
                 pass
+            print("[vad] S5 filesystem flush (50ms)", flush=True)
             time.sleep(0.05)  # let filesystem flush
 
             # Check file was created
@@ -237,11 +241,13 @@ class VADLoop:
                 continue
 
             file_size = chunk_file.stat().st_size
+            print(f"[vad] S6 chunk file size: {file_size}B", flush=True)
             if file_size < 500:
                 print(f'[vad] skip: file too small ({file_size}B)')
                 continue  # too small, likely empty/broken
 
             # Convert to 16k mono PCM for VAD
+            print(f"[vad] S7 running ffmpeg convert...", flush=True)
             try:
                 subprocess.run([
                     'ffmpeg', '-i', str(chunk_file),
@@ -258,13 +264,17 @@ class VADLoop:
                 continue
 
 
+            # ── S8: Read WAV data ────────────────────────────────
+            print(f"[vad] S8 wav read...", flush=True)
             with wave.open(str(wav_file), 'rb') as wf:
                 chunk_data = wf.readframes(wf.getnframes())
+            print(f"[vad] S8 wav read: {len(chunk_data)} bytes", flush=True)
 
             if not chunk_data:
                 print('[vad] skip: no audio data in wav')
                 continue
 
+            print("[vad] S9 running VAD...", flush=True)
             # ── VAD check on this chunk ───────────────────────────────
             num_samples = len(chunk_data) // 2
             is_speech = False
@@ -277,15 +287,14 @@ class VADLoop:
 
             # Energy fallback
             rms = compute_rms(chunk_data)
+            print(f"[vad] S10 RMS={rms:.0f} thr={threshold} is_speech={is_speech}", flush=True)
             if rms > threshold:
                 is_speech = True
 
-            # ── Debug: log every iteration (chunk stats) ─────────────
-            chunk_bytes = len(chunk_data)
-            debug_msg = (f"  chunk={chunk_bytes}B rms={rms:.0f} thr={threshold} "
-                         f"vad={is_speech} buf={len(speech_buffer)//64}f "
-                         f"speak={is_speaking} silence={silence_frames}")
-            print(f"[vad] {debug_msg}", flush=True)  # always on its own line
+            # ── S11: State machine ─────────────────────────────────
+            print(f"[vad] S11 is_speech={is_speech} speak={is_speaking} "
+                  f"speech={speech_frames} silence={silence_frames} "
+                  f"buf={len(speech_buffer)//64}f", flush=True)
 
             if is_speech:
                 speech_frames += 1
