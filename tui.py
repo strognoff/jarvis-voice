@@ -67,7 +67,7 @@ def log(msg):
 
 def print_banner():
     print()
-    print("  ╔══════════════════════════════════════╗")
+    print(f"  ╔══════════════════════════════════════╗  v{__version__}")
     print("  ║       🤖 JARVIS VOICE TUI 🤖         ║")
     print("  ╚══════════════════════════════════════╝")
     print()
@@ -264,7 +264,7 @@ class VADLoop:
             debug_msg = (f"  chunk={chunk_bytes}B rms={rms:.0f} thr={threshold} "
                          f"vad={is_speech} buf={len(speech_buffer)//64}f "
                          f"speak={is_speaking} silence={silence_frames}")
-            print(debug_msg)  # not log() — always visible, no \r overwrite
+            print(f"[vad] {debug_msg}", flush=True)  # always on its own line
 
             if is_speech:
                 speech_frames += 1
@@ -427,13 +427,19 @@ def test_mic(duration=1.0, out_path='/data/data/com.termux/files/home/jarvis-voi
     return True
 
 
+__version__ = "0.2.0"
+
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] in ('--test-mic', '--mic-test', '-t'):
+    if len(sys.argv) == 2 and sys.argv[1] in ("--version", "-v"):
+        print(f"jarvis-tui {__version__}")
+        sys.exit(0)
+
+    if len(sys.argv) > 1 and sys.argv[1] in ("--test-mic", "--mic-test", "-t"):
         import argparse
-        parser = argparse.ArgumentParser(description='Jarvis Voice TUI — mic test')
-        parser.add_argument('-d', '--duration', type=float, default=1.0)
-        parser.add_argument('-f', '--file', default='/data/data/com.termux/files/home/jarvis-voice/mic_test.m4a')
-        args, _ = parser.parse_known_args()   # parse_known_args avoids fail on --test-mic
+        parser = argparse.ArgumentParser(description=f"Jarvis Voice TUI v{__version__} — mic test")
+        parser.add_argument("-d", "--duration", type=float, default=1.0)
+        parser.add_argument("-f", "--file", default="/data/data/com.termux/files/home/jarvis-voice/mic_test.m4a")
+        args, _ = parser.parse_known_args()
         ok = test_mic(duration=args.duration, out_path=args.file)
         sys.exit(0 if ok else 1)
 
