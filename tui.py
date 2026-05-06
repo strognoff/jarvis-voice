@@ -644,6 +644,12 @@ if __name__ == "__main__":
             print("Press Enter to start recording (or Ctrl+C to cancel)...", end=" ", flush=True)
             input()
             ok, msg = test_mic_vad()
+            print()
+            if ok:
+                print(f"✅ PASS: {msg}")
+            else:
+                print(f"❌ FAIL: {msg}")
+            sys.exit(0 if ok else 1)
 
         elif sys.argv[1] in ("--test-vad-synthetic", "--vad-synthetic"):
             # VAD test on synthetic audio (no microphone needed)
