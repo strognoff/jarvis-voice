@@ -212,15 +212,16 @@ class VADLoop:
                     except Exception:
                         pass
 
-            # ── S2: Start recording with -l duration (auto-exit) ───
+            # ── S2: Start recording (using -d like _record_chunk which works) ───
             record_proc = subprocess.Popen(
-                ['termux-microphone-record', '-f', str(chunk_file), '-l', '1'],
+                ['termux-microphone-record', '-f', str(chunk_file), '-d'],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
             )
+            time.sleep(0.6)  # record for ~600ms
+            record_proc.terminate()
             try:
-                record_proc.wait(timeout=2)
+                record_proc.wait(timeout=0.5)
             except subprocess.TimeoutExpired:
-                print("[vad] S3 record timed out, killing", flush=True)
                 record_proc.kill()
                 record_proc.wait()
 
@@ -474,26 +475,19 @@ def test_mic_vad():
         if f.exists():
             os.remove(f)
 
-    # Step 1: Record 3 seconds
+    # Step 1: Record 3 seconds using -d (same approach that works in _record_chunk)
     print("  🎤 Recording 3 seconds from microphone...", flush=True)
     print("     (Speak clearly during these 3 seconds)", flush=True)
 
-    # Try with -l first, fall back to kill-after-3s
     record_proc = subprocess.Popen(
-        ['termux-microphone-record', '-f', str(chunk_file), '-l', '3'],
+        ['termux-microphone-record', '-f', str(chunk_file), '-d'],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
     )
-    retcode = record_proc.wait(timeout=5)
-
-    if retcode != 0 or not chunk_file.exists() or chunk_file.stat().st_size < 5000:
-        # Fall back: record without -l, kill after 3s
-        print("  ↩️  Trying without -l flag (killing after 3s)...", flush=True)
-        chunk_file.unlink(missing_ok=True) if chunk_file.exists() else None
-        record_proc = subprocess.Popen(
-            ['termux-microphone-record', '-f', str(chunk_file)],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-        )
-        time.sleep(3)
+    time.sleep(3)  # record for exactly 3 seconds
+    record_proc.terminate()
+    try:
+        record_proc.wait(timeout=1)
+    except subprocess.TimeoutExpired:
         record_proc.kill()
         record_proc.wait()
 
@@ -619,7 +613,7 @@ def test_mic(duration=1.0, out_path='/data/data/com.termux/files/home/jarvis-voi
     return True
 
 
-__version__ = "0.5.0"
+__version__ = "0.7.0"
 
 if __name__ == "__main__":
     if len(sys.argv) == 2 and sys.argv[1] in ("--version", "-v"):
