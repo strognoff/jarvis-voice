@@ -1,6 +1,6 @@
 [project]
 name = "jarvis-voice"
-version = "0.2.0"
+version = "0.3.0"
 description = "Jarvis Voice TUI — always-on AI voice assistant powered by OpenClaw"
 readme = "README.md"
 authors = [{name = "Jarvis AI", email = "jarvis@openclaw.ai"}]

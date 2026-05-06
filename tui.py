@@ -457,7 +457,7 @@ def test_mic(duration=1.0, out_path='/data/data/com.termux/files/home/jarvis-voi
     return True
 
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 if __name__ == "__main__":
     if len(sys.argv) == 2 and sys.argv[1] in ("--version", "-v"):
