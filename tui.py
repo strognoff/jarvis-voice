@@ -204,58 +204,43 @@ class VADLoop:
         threshold = ENERGY_THRESHOLD  # local alias, avoids late binding issues in loops
 
         while self.running:
-            # ── S1: Remove old chunk file first ────────────────────
+            # ── S1: Remove old files ────────────────────────────────
             print("[vad] S1 cleanup old files", flush=True)
-            if chunk_file.exists():
-                try:
-                    os.remove(chunk_file)
-                except Exception:
-                    pass
-            if wav_file.exists():
-                try:
-                    os.remove(wav_file)
-                except Exception:
-                    pass
+            for f in (chunk_file, wav_file):
+                if f.exists():
+                    try:
+                        os.remove(f)
+                    except Exception:
+                        pass
 
-            # ── S2: Start recording ───────────────────────────────
+            # ── S2: Start recording with -l duration (auto-exit) ───
             print("[vad] S2 starting mic record", flush=True)
             record_proc = subprocess.Popen(
-                ['termux-microphone-record', '-f', str(chunk_file)],
+                ['termux-microphone-record', '-f', str(chunk_file), '-l', '1'],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
             )
-            print("[vad] S3 recording... (600ms)", flush=True)
-            time.sleep(0.6)  # record for ~600ms
-            # Kill hard — sigkill ensures process dies immediately
-            print("[vad] S4 killing record process", flush=True)
-            # Try SIGTERM first (graceful — lets encoder flush audio to file)
-            record_proc.terminate()
+            print("[vad] S3 waiting for record (1s auto-exit)...", flush=True)
             try:
-                record_proc.wait(timeout=0.3)
+                record_proc.wait(timeout=2)
             except subprocess.TimeoutExpired:
-                # Still running after 300ms — SIGKILL
+                print("[vad] S3 record timed out, killing", flush=True)
                 record_proc.kill()
-                try:
-                    record_proc.wait()
-                except Exception:
-                    pass
-            except Exception:
-                pass
-            print("[vad] S5 filesystem flush (100ms)", flush=True)
-            time.sleep(0.1)  # let filesystem flush
+                record_proc.wait()
 
-            # Check file was created
+            # ── S4: Check file was created ─────────────────────────
+            print("[vad] S4 checking chunk file", flush=True)
             if not chunk_file.exists():
                 print('[vad] skip: chunk file not created')
                 continue
 
             file_size = chunk_file.stat().st_size
-            print(f"[vad] S6 chunk file size: {file_size}B", flush=True)
-            if file_size < 1000:
+            print(f"[vad] S4 chunk file size: {file_size}B", flush=True)
+            if file_size < 2000:
                 print(f'[vad] skip: file too small ({file_size}B)')
-                continue  # too small, likely empty/broken
+                continue
 
-            # Convert to 16k mono PCM for VAD
-            print(f"[vad] S7 running ffmpeg convert...", flush=True)
+            # ── S5: Convert to 16k mono PCM ───────────────────────
+            print(f"[vad] S5 running ffmpeg convert...", flush=True)
             try:
                 result = subprocess.run([
                     'ffmpeg', '-i', str(chunk_file),
@@ -276,18 +261,18 @@ class VADLoop:
                 continue
 
 
-            # ── S8: Read WAV data ────────────────────────────────
-            print(f"[vad] S8 wav read...", flush=True)
+            # ── S6: Read WAV data ────────────────────────────────
+            print(f"[vad] S6 wav read...", flush=True)
             with wave.open(str(wav_file), 'rb') as wf:
                 chunk_data = wf.readframes(wf.getnframes())
-            print(f"[vad] S8 wav read: {len(chunk_data)} bytes", flush=True)
+            print(f"[vad] S6 wav read: {len(chunk_data)} bytes", flush=True)
 
             if not chunk_data:
                 print('[vad] skip: no audio data in wav')
                 continue
 
-            print("[vad] S9 running VAD...", flush=True)
-            # ── VAD check on this chunk ───────────────────────────────
+            print("[vad] S7 running VAD check...", flush=True)
+            # ── S7: VAD check on this chunk ───────────────────────────────
             num_samples = len(chunk_data) // 2
             is_speech = False
 
@@ -299,12 +284,12 @@ class VADLoop:
 
             # Energy fallback
             rms = compute_rms(chunk_data)
-            print(f"[vad] S10 RMS={rms:.0f} thr={threshold} is_speech={is_speech}", flush=True)
+            print(f"[vad] S8 RMS energy={rms:.0f} thr={threshold} is_speech={is_speech}", flush=True)
             if rms > threshold:
                 is_speech = True
 
-            # ── S11: State machine ─────────────────────────────────
-            print(f"[vad] S11 is_speech={is_speech} speak={is_speaking} "
+            # ── S9: State machine ─────────────────────────────────
+            print(f"[vad] S9 state: is_speech={is_speech} speak={is_speaking} "
                   f"speech={speech_frames} silence={silence_frames} "
                   f"buf={len(speech_buffer)//64}f", flush=True)
 
