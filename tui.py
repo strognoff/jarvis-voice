@@ -16,6 +16,7 @@ import os
 import time
 import subprocess
 import threading
+_recording_lock = threading.Lock()  # shared lock for mic recording
 import wave
 import struct
 from pathlib import Path
@@ -212,18 +213,19 @@ class VADLoop:
                     except Exception:
                         pass
 
-            # ── S2: Start recording (using -d like _record_chunk which works) ───
-            record_proc = subprocess.Popen(
-                ['termux-microphone-record', '-f', str(chunk_file), '-d'],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-            )
-            time.sleep(0.6)  # record for ~600ms
-            record_proc.terminate()
-            try:
-                record_proc.wait(timeout=0.5)
-            except subprocess.TimeoutExpired:
-                record_proc.kill()
-                record_proc.wait()
+            # Use lock so test functions can record without race conditions
+            with _recording_lock:
+                record_proc = subprocess.Popen(
+                    ['termux-microphone-record', '-f', str(chunk_file), '-d'],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                )
+                time.sleep(0.6)  # record for ~600ms
+                record_proc.terminate()
+                try:
+                    record_proc.wait(timeout=0.5)
+                except subprocess.TimeoutExpired:
+                    record_proc.kill()
+                    record_proc.wait()
 
             # ── S4: Check file was created ─────────────────────────
             if not chunk_file.exists():
@@ -479,17 +481,18 @@ def test_mic_vad():
     print("  🎤 Recording 3 seconds from microphone...", flush=True)
     print("     (Speak clearly during these 3 seconds)", flush=True)
 
-    record_proc = subprocess.Popen(
-        ['termux-microphone-record', '-f', str(chunk_file), '-d'],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-    )
-    time.sleep(3)  # record for exactly 3 seconds
-    record_proc.terminate()
-    try:
-        record_proc.wait(timeout=1)
-    except subprocess.TimeoutExpired:
-        record_proc.kill()
-        record_proc.wait()
+    with _recording_lock:
+        record_proc = subprocess.Popen(
+            ['termux-microphone-record', '-f', str(chunk_file), '-d'],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+        time.sleep(3)  # record for exactly 3 seconds
+        record_proc.terminate()
+        try:
+            record_proc.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            record_proc.kill()
+            record_proc.wait()
 
     if not chunk_file.exists():
         return False, "Microphone file not created — is Termux microphone permission granted? (Settings > Apps > Termux > Permissions > Microphone)"
@@ -613,7 +616,7 @@ def test_mic(duration=1.0, out_path='/data/data/com.termux/files/home/jarvis-voi
     return True
 
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"
 
 if __name__ == "__main__":
     if len(sys.argv) == 2 and sys.argv[1] in ("--version", "-v"):
