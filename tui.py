@@ -214,14 +214,14 @@ class VADLoop:
 
             # Use lock so test functions can record without race conditions
             with _recording_lock:
-                # Record directly to 16k mono WAV using SoX (no m4a conversion needed)
+                # Record using termux-mic (shell=True needed for -l to work in subprocess)
                 record_proc = subprocess.Popen(
-                    ['rec', '-r', '16000', '-c', '1', str(wav_file), 'trim', '0', '0.6'],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                    f'termux-microphone-record -f {wav_file} -l 1',
+                    shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
                 )
-                ret = record_proc.wait(timeout=2)
+                ret = record_proc.wait()
                 if ret != 0:
-                    print(f'[vad] ⚠ SoX rec failed (exit {ret})')
+                    print(f'[vad] ⚠ termux-mic failed (exit {ret})')
                     continue
 
             # ── S4: Check WAV was created ──────────────────────
@@ -234,12 +234,25 @@ class VADLoop:
                 print(f'[vad] ⚠ wav file too small ({file_size}B) — is mic working?')
                 continue
 
-            # ── S5: Read WAV data ───────────────────────────────
-            with wave.open(str(wav_file), 'rb') as wf:
-                chunk_data = wf.readframes(wf.getnframes())
+            # ── S5: Convert to 16k mono PCM via ffmpeg ──────────────
+            import tempfile
+            tmp_wav = Path(tempfile.gettempdir()) / 'vad_chunk_16k.wav'
+            result = subprocess.run([
+                'ffmpeg', '-i', str(wav_file),
+                '-ar', '16000', '-ac', '1', '-acodec', 'pcm_s16le',
+                str(tmp_wav), '-y'
+            ], capture_output=True, timeout=5)
+            if result.returncode != 0:
+                print(f'[vad] ⚠ ffmpeg failed rc={result.returncode}')
+                continue
+            if not tmp_wav.exists():
+                print('[vad] ⚠ ffmpeg produced no output')
+                continue
+            chunk_data = tmp_wav.read_bytes()
+            tmp_wav.unlink(missing_ok=True)
 
             if not chunk_data:
-                print('[vad] skip: no audio data in wav')
+                print('[vad] skip: no audio data')
                 continue
 
             # ── S6: VAD check on this chunk ───────────────────────────────
@@ -443,18 +456,23 @@ def test_mic_vad():
     work_dir = Path("/data/data/com.termux/files/home/jarvis-voice")
     wav_file = work_dir / "vad_test_chunk.wav"
 
-    # Step 1: Record 3 seconds directly to WAV using SoX
+    # Remove existing file (termux-mic refuses to overwrite)
+    if wav_file.exists():
+        try:
+            wav_file.unlink()
+        except Exception:
+            pass
+
+    # Step 1: Record 3 seconds directly to WAV
     print("  🎤 Recording 3 seconds from microphone...", flush=True)
     print("     (Speak clearly during these 3 seconds)", flush=True)
 
     with _recording_lock:
         record_proc = subprocess.Popen(
-            ['rec', '-r', '16000', '-c', '1', str(wav_file), 'trim', '0', '3'],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            f'termux-microphone-record -f {wav_file} -l 3',
+            shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
         )
-        ret = record_proc.wait(timeout=5)
-        if ret != 0:
-            return False, f"SoX rec failed (exit {ret}) — is sox installed? (pkg install sox)"
+        ret = record_proc.wait()  # wait for -l 3 to auto-exit
 
     if not wav_file.exists():
         return False, "Microphone file not created — is Termux microphone permission granted?"
@@ -462,7 +480,7 @@ def test_mic_vad():
     size = wav_file.stat().st_size
     print(f"  📁 Recorded file: {size} bytes", flush=True)
 
-    if size < 10000:
+    if size < 2000:
         return False, f"File too small ({size}B) — microphone captured no audio. Check Termux microphone permission."
 
     # Step 2: Run WebRTC VAD
@@ -532,31 +550,29 @@ def _kill_existing_recording():
 
 def test_mic(duration=3.0, out_path='/data/data/com.termux/files/home/jarvis-voice/mic_test.wav'):
     """Quick mic test — records `duration` seconds, checks file, plays it back."""
-    out = Path(out_path)
-    if out.exists():
-        out.unlink()
-    # Kill any hanging recording from a previous run
-    _kill_existing_recording()
+    wav_file = Path(out_path)
+    # Remove existing file (termux-mic refuses to overwrite)
+    if wav_file.exists():
+        try:
+            wav_file.unlink()
+        except Exception:
+            pass
 
-    # Record directly to WAV using SoX
     print(f"🎤 Recording {duration}s... (speak clearly)")
-    wav_file = Path(str(out).replace('.m4a', '.wav'))
+
     with _recording_lock:
         proc = subprocess.Popen(
-            ['rec', '-r', '16000', '-c', '1', str(wav_file), 'trim', '0', str(int(duration))],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            f'termux-microphone-record -f {wav_file} -l {int(duration)}',
+            shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
         )
-        ret = proc.wait(timeout=duration + 3)
-        if ret != 0:
-            print(f"❌ FAIL — SoX rec failed (exit {ret})")
-            return False
+        ret = proc.wait()  # wait for -l to auto-exit
 
     if not wav_file.exists():
         print(f"❌ FAIL — file not created: {wav_file}")
         return False
 
     size = wav_file.stat().st_size
-    if size < 10000:
+    if size < 2000:
         print(f"❌ FAIL — file too small ({size} bytes), likely empty recording")
         return False
 
@@ -587,7 +603,7 @@ def test_mic(duration=3.0, out_path='/data/data/com.termux/files/home/jarvis-voi
     return True
 
 
-__version__ = "1.5.0"
+__version__ = "1.7.0"
 
 if __name__ == "__main__":
     if len(sys.argv) == 2 and sys.argv[1] in ("--version", "-v"):
@@ -600,7 +616,7 @@ if __name__ == "__main__":
             import argparse
             parser = argparse.ArgumentParser(description=f"Jarvis Voice TUI v{__version__} — mic test")
             parser.add_argument("-d", "--duration", type=float, default=3.0)
-            parser.add_argument("-f", "--file", default="/data/data/com.termux/files/home/jarvis-voice/mic_test.m4a")
+            parser.add_argument("-f", "--file", default="/data/data/com.termux/files/home/jarvis-voice/mic_test.wav")
             args, _ = parser.parse_known_args()
             ok = test_mic(duration=args.duration, out_path=args.file)
             sys.exit(0 if ok else 1)
