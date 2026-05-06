@@ -74,8 +74,8 @@ def print_banner():
 
 def render(face, status=""):
     emoji = FACES.get(face, FACES["idle"])
-    line = f"\r  {emoji} {status}" if status else f"\r  {emoji}"
-    print(line + " " * 20, end="", flush=True)
+    line = f"  {emoji} {status}" if status else f"  {emoji}"
+    print(line)
 
 def speak(text: str):
     try:
@@ -233,10 +233,12 @@ class VADLoop:
 
             # Check file was created
             if not chunk_file.exists():
+                print('[vad] skip: chunk file not created')
                 continue
 
             file_size = chunk_file.stat().st_size
             if file_size < 500:
+                print(f'[vad] skip: file too small ({file_size}B)')
                 continue  # too small, likely empty/broken
 
             # Convert to 16k mono PCM for VAD
@@ -248,10 +250,11 @@ class VADLoop:
                     str(wav_file), '-y'
                 ], capture_output=True, timeout=5)
             except Exception as e:
-                log(f"ffmpeg convert error: {e}")
+                print(f'[vad] skip: ffmpeg error: {e}')
                 continue
 
             if not wav_file.exists():
+                print('[vad] skip: wav file not created after ffmpeg')
                 continue
 
 
@@ -259,6 +262,7 @@ class VADLoop:
                 chunk_data = wf.readframes(wf.getnframes())
 
             if not chunk_data:
+                print('[vad] skip: no audio data in wav')
                 continue
 
             # ── VAD check on this chunk ───────────────────────────────
