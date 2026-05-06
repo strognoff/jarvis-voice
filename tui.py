@@ -195,6 +195,11 @@ class VADLoop:
         chunk_file = work_dir / "vad_chunk.m4a"
         wav_file = work_dir / "vad_chunk.wav"
 
+        # Kill any stale recording from a previous run
+        subprocess.run(['termux-microphone-record', '-q'],
+                       capture_output=True, timeout=5)
+        time.sleep(0.3)
+
         speech_buffer = b""
         speech_frames = 0
         silence_frames = 0
@@ -477,6 +482,11 @@ def test_mic_vad():
         if f.exists():
             os.remove(f)
 
+    # Kill any existing recording first
+    subprocess.run(['termux-microphone-record', '-q'],
+                   capture_output=True, timeout=5)
+    time.sleep(0.5)
+
     # Step 1: Record 3 seconds using -d (same approach that works in _record_chunk)
     print("  🎤 Recording 3 seconds from microphone...", flush=True)
     print("     (Speak clearly during these 3 seconds)", flush=True)
@@ -574,11 +584,19 @@ def test_mic_vad():
     else:
         return True, f"VAD working correctly ({pct:.1f}% speech detected)."
 
+def _kill_existing_recording():
+    """Kill any existing termux-microphone-record process so we can start fresh."""
+    subprocess.run(['termux-microphone-record', '-q'],
+                   capture_output=True, timeout=5)
+    time.sleep(0.5)
+
 def test_mic(duration=3.0, out_path='/data/data/com.termux/files/home/jarvis-voice/mic_test.m4a'):
     """Quick mic test — records `duration` seconds, checks file, plays it back."""
     out = Path(out_path)
     if out.exists():
         out.unlink()
+    # Kill any hanging recording from a previous run
+    _kill_existing_recording()
 
     print(f"🎤 Recording {duration}s... (speak clearly)")
     with _recording_lock:
