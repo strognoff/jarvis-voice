@@ -176,7 +176,7 @@ class VADLoop:
         """Record a short audio chunk using termux-microphone-record."""
         try:
             proc = subprocess.Popen(
-                ['termux-microphone-record', '-f', out_path, '-d'],
+                ['termux-microphone-record', '-f', out_path, '-e', 'aac', '-b', '128', '-d'],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
             )
             time.sleep(duration_s)
@@ -221,7 +221,7 @@ class VADLoop:
             # Use lock so test functions can record without race conditions
             with _recording_lock:
                 record_proc = subprocess.Popen(
-                    ['termux-microphone-record', '-f', str(chunk_file), '-d'],
+                    ['termux-microphone-record', '-f', str(chunk_file), '-e', 'aac', '-b', '128', '-d'],
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
                 )
                 time.sleep(0.6)  # record for ~600ms
@@ -493,7 +493,7 @@ def test_mic_vad():
 
     with _recording_lock:
         record_proc = subprocess.Popen(
-            ['termux-microphone-record', '-f', str(chunk_file), '-d'],
+            ['termux-microphone-record', '-f', str(chunk_file), '-e', 'aac', '-b', '128', '-d'],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
         )
         time.sleep(3)  # record for exactly 3 seconds
@@ -601,7 +601,7 @@ def test_mic(duration=3.0, out_path='/data/data/com.termux/files/home/jarvis-voi
     print(f"🎤 Recording {duration}s... (speak clearly)")
     with _recording_lock:
         proc = subprocess.Popen(
-            ['termux-microphone-record', '-f', str(out), '-d'],
+            ['termux-microphone-record', '-f', str(out), '-e', 'aac', '-b', '128', '-d'],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
         )
         time.sleep(duration)
@@ -624,10 +624,19 @@ def test_mic(duration=3.0, out_path='/data/data/com.termux/files/home/jarvis-voi
     # Play back the recording — try multiple players
     print(f"🔊 Playing back recording...")
     played = False
+    # Boost volume: convert to wav, apply +20dB gain, then play
+    import tempfile
+    boosted = Path(tempfile.gettempdir()) / ("boosted_" + out.name + ".wav")
+    subprocess.run([
+        'ffmpeg', '-i', str(out), '-af', 'volume=20dB', '-ar', '16000', '-ac', '1',
+        str(boosted), '-y'
+    ], capture_output=True, timeout=15)
+
     for player_cmd in [
+        ['ffplay', '-nodisp', '-autoexit', '-loglevel', 'quiet', str(boosted)],
         ['ffplay', '-nodisp', '-autoexit', '-loglevel', 'quiet', str(out)],
-        ['termux-media-player', 'play', str(out)],
-        ['mpv', '--no-video', '--idle=once', str(out)],
+        ['termux-media-player', 'play', str(boosted)],
+        ['mpv', '--no-video', '--idle=once', str(boosted)],
     ]:
         play_result = subprocess.run(
             player_cmd, capture_output=True, timeout=int(duration + 5)
