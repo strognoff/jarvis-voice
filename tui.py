@@ -621,15 +621,27 @@ def test_mic(duration=3.0, out_path='/data/data/com.termux/files/home/jarvis-voi
 
     print(f"✅ Mic working! File: {out} ({size} bytes)")
 
-    # Play back the recording
-    print(f"🔊 Playing back recording for {duration}s...")
-    play_result = subprocess.run(
+    # Play back the recording — try multiple players
+    print(f"🔊 Playing back recording...")
+    played = False
+    for player_cmd in [
+        ['ffplay', '-nodisp', '-autoexit', '-loglevel', 'quiet', str(out)],
         ['termux-media-player', 'play', str(out)],
-        capture_output=True, timeout=int(duration + 5)
-    )
-    if play_result.returncode != 0:
-        print(f"⚠️  Playback failed (termux-media-player returned {play_result.returncode})")
-        print(f"   Audio was recorded and saved to {out}")
+        ['mpv', '--no-video', '--idle=once', str(out)],
+    ]:
+        play_result = subprocess.run(
+            player_cmd, capture_output=True, timeout=int(duration + 5)
+        )
+        if play_result.returncode == 0:
+            played = True
+            print(f"   ✅ Played via {player_cmd[0]}")
+            break
+
+    if not played:
+        print(f"⚠️  Could not auto-play — try manually:")
+        print(f"   ffplay {out}")
+        print(f"   termux-media-player play {out}")
+        print(f"   Audio saved at: {out}")
 
     # Quick ffprobe check
     probe = subprocess.run(
