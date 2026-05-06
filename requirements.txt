@@ -1,0 +1,15 @@
+# Jarvis Voice Assistant — Python dependencies
+# Install: pip install -r requirements.txt
+
+# Audio / Wake word
+pyaudio>=0.2.14
+numpy>=1.24.0
+
+# Optional: for faster local STT (if ctranslate2 works on your platform)
+# faster-whisper>=1.0.0
+
+# HTTP client (for OpenAI STT/TTS)
+requests>=2.31.0
+
+# Optional: openwakeword for proper wake word detection
+# openwakeword>=0.1.0
