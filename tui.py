@@ -205,7 +205,6 @@ class VADLoop:
 
         while self.running:
             # ── S1: Remove old files ────────────────────────────────
-            print("[vad] S1 cleanup old files", flush=True)
             for f in (chunk_file, wav_file):
                 if f.exists():
                     try:
@@ -214,12 +213,10 @@ class VADLoop:
                         pass
 
             # ── S2: Start recording with -l duration (auto-exit) ───
-            print("[vad] S2 starting mic record", flush=True)
             record_proc = subprocess.Popen(
                 ['termux-microphone-record', '-f', str(chunk_file), '-l', '1'],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
             )
-            print("[vad] S3 waiting for record (1s auto-exit)...", flush=True)
             try:
                 record_proc.wait(timeout=2)
             except subprocess.TimeoutExpired:
@@ -228,19 +225,16 @@ class VADLoop:
                 record_proc.wait()
 
             # ── S4: Check file was created ─────────────────────────
-            print("[vad] S4 checking chunk file", flush=True)
             if not chunk_file.exists():
-                print('[vad] skip: chunk file not created')
+                print('[vad] ⚠ chunk file not created after record — is mic working?')
                 continue
 
             file_size = chunk_file.stat().st_size
-            print(f"[vad] S4 chunk file size: {file_size}B", flush=True)
             if file_size < 2000:
-                print(f'[vad] skip: file too small ({file_size}B)')
+                print(f'[vad] ⚠ file too small ({file_size}B) — is mic working?')
                 continue
 
             # ── S5: Convert to 16k mono PCM ───────────────────────
-            print(f"[vad] S5 running ffmpeg convert...", flush=True)
             try:
                 result = subprocess.run([
                     'ffmpeg', '-i', str(chunk_file),
@@ -262,16 +256,13 @@ class VADLoop:
 
 
             # ── S6: Read WAV data ────────────────────────────────
-            print(f"[vad] S6 wav read...", flush=True)
             with wave.open(str(wav_file), 'rb') as wf:
                 chunk_data = wf.readframes(wf.getnframes())
-            print(f"[vad] S6 wav read: {len(chunk_data)} bytes", flush=True)
 
             if not chunk_data:
                 print('[vad] skip: no audio data in wav')
                 continue
 
-            print("[vad] S7 running VAD check...", flush=True)
             # ── S7: VAD check on this chunk ───────────────────────────────
             num_samples = len(chunk_data) // 2
             is_speech = False
@@ -284,15 +275,10 @@ class VADLoop:
 
             # Energy fallback
             rms = compute_rms(chunk_data)
-            print(f"[vad] S8 RMS energy={rms:.0f} thr={threshold} is_speech={is_speech}", flush=True)
             if rms > threshold:
                 is_speech = True
 
-            # ── S9: State machine ─────────────────────────────────
-            print(f"[vad] S9 state: is_speech={is_speech} speak={is_speaking} "
-                  f"speech={speech_frames} silence={silence_frames} "
-                  f"buf={len(speech_buffer)//64}f", flush=True)
-
+            # ── S8: State machine ─────────────────────────────────
             if is_speech:
                 speech_frames += 1
                 silence_frames = 0
@@ -412,6 +398,185 @@ class JarvisTUI:
             self.running = False
 
 
+
+
+def test_vad_synthetic():
+    """Test VAD on generated synthetic audio (no microphone needed). Returns (ok, message)."""
+    import webrtcvad, wave, struct, math, os
+    from pathlib import Path
+
+    work_dir = Path("/data/data/com.termux/files/home/jarvis-voice")
+    wav_file = work_dir / "vad_synthetic_test.wav"
+
+    print("  🎙️  Testing WebRTC VAD on synthetic audio (no microphone)", flush=True)
+
+    SAMPLE_RATE = 16000
+    vad = webrtcvad.Vad(mode=3)
+
+    # Generate 3 seconds: 1s silence, 1s 1kHz tone, 1s silence
+    audio = b""
+    for i in range(SAMPLE_RATE * 3):
+        t = i / SAMPLE_RATE
+        if 1.0 <= t < 2.0:
+            # 1 second of 1kHz tone at 80% amplitude
+            sample = int(0.8 * 16000 * math.sin(2 * math.pi * 1000 * t))
+        else:
+            sample = 0
+        audio += struct.pack('<h', sample)
+
+    # Save WAV
+    with wave.open(str(wav_file), 'wb') as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(SAMPLE_RATE)
+        wf.writeframes(audio)
+
+    # Run VAD
+    frame_size = int(SAMPLE_RATE * 30 / 1000) * 2  # 960 bytes
+    n_speech = n_total = 0
+
+    for i in range(0, len(audio) - frame_size, frame_size):
+        chunk = audio[i:i+frame_size]
+        n_total += 1
+        try:
+            is_sp = vad.is_speech(chunk, SAMPLE_RATE, 480)
+        except Exception:
+            is_sp = False
+        if is_sp:
+            n_speech += 1
+
+    pct = n_speech / n_total * 100 if n_total > 0 else 0
+
+    # Expected: ~33% speech (1s of 3s)
+    # Allow wide margin: 20-60% is reasonable for 1kHz tone
+    os.remove(wav_file)
+
+    print(f"  📊 VAD on synthetic 1kHz tone (1s speech / 3s total):", flush=True)
+    print(f"     Speech detected: {n_speech}/{n_total} frames ({pct:.1f}%)", flush=True)
+
+    if pct < 15:
+        return False, f"VAD detected only {pct:.1f}% — expected ~33% for 1kHz tone. VAD may be broken."
+    elif pct > 70:
+        return False, f"VAD detected {pct:.1f}% — too much. VAD may be too sensitive."
+    else:
+        return True, f"VAD working correctly ({pct:.1f}% detected, expected ~33%)"
+
+def test_mic_vad():
+    """Test microphone recording + VAD on real audio. Returns (ok, message)."""
+    import tempfile, webrtcvad, wave, struct, os, subprocess
+
+    work_dir = Path("/data/data/com.termux/files/home/jarvis-voice")
+    chunk_file = work_dir / "vad_test_chunk.m4a"
+    wav_file = work_dir / "vad_test_chunk.wav"
+
+    # Clean up
+    for f in (chunk_file, wav_file):
+        if f.exists():
+            os.remove(f)
+
+    # Step 1: Record 3 seconds
+    print("  🎤 Recording 3 seconds from microphone...", flush=True)
+    print("     (Speak clearly during these 3 seconds)", flush=True)
+
+    # Try with -l first, fall back to kill-after-3s
+    record_proc = subprocess.Popen(
+        ['termux-microphone-record', '-f', str(chunk_file), '-l', '3'],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+    )
+    retcode = record_proc.wait(timeout=5)
+
+    if retcode != 0 or not chunk_file.exists() or chunk_file.stat().st_size < 5000:
+        # Fall back: record without -l, kill after 3s
+        print("  ↩️  Trying without -l flag (killing after 3s)...", flush=True)
+        chunk_file.unlink(missing_ok=True) if chunk_file.exists() else None
+        record_proc = subprocess.Popen(
+            ['termux-microphone-record', '-f', str(chunk_file)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+        time.sleep(3)
+        record_proc.kill()
+        record_proc.wait()
+
+    if not chunk_file.exists():
+        return False, "Microphone file not created — is Termux microphone permission granted? (Settings > Apps > Termux > Permissions > Microphone)"
+
+    size = chunk_file.stat().st_size
+    print(f"  📁 Recorded file: {size} bytes", flush=True)
+
+    if size < 5000:
+        return False, f"File too small ({size}B) — microphone captured no audio. Check Termux microphone permission."
+
+    # Step 2: Convert to 16k mono
+    print("  🔄 Converting to 16kHz mono WAV...", flush=True)
+    result = subprocess.run([
+        'ffmpeg', '-i', str(chunk_file),
+        '-ar', '16000', '-ac', '1', '-acodec', 'pcm_s16le',
+        str(wav_file), '-y'
+    ], capture_output=True, timeout=10)
+
+    if result.returncode != 0:
+        err = result.stderr.decode('utf-8', errors='replace')[:200]
+        return False, f"ffmpeg failed: {err}"
+
+    if not wav_file.exists() or wav_file.stat().st_size < 1000:
+        return False, "ffmpeg produced no audio output"
+
+    # Step 3: Run WebRTC VAD
+    print("  🧠 Running WebRTC VAD...", flush=True)
+    vad = webrtcvad.Vad(mode=3)
+    vad.set_mode(3)
+
+    with wave.open(str(wav_file), 'rb') as wf:
+        rate = wf.getframerate()
+        n_frames = wf.getnframes()
+        audio = wf.readframes(n_frames)
+
+    if not audio:
+        return False, "WAV has no audio data"
+
+    frame_size = int(16000 * 30 / 1000) * 2  # 960 bytes
+    n_speech = n_total = 0
+    speech_rms_sum = silence_rms_sum = 0
+
+    for i in range(0, len(audio) - frame_size, frame_size):
+        chunk = audio[i:i+frame_size]
+        n_total += 1
+        num_samples = len(chunk) // 2
+        try:
+            is_sp = vad.is_speech(chunk, rate, num_samples)
+        except Exception:
+            is_sp = False
+        n = len(chunk) // 2
+        rms = (sum(struct.unpack_from('<h', chunk, j)[0] ** 2 for j in range(0, len(chunk) - 1, 2)) / n) ** 0.5
+        if is_sp:
+            n_speech += 1
+            speech_rms_sum += rms
+        else:
+            silence_rms_sum += rms
+
+    pct = n_speech / n_total * 100 if n_total > 0 else 0
+    avg_speech = speech_rms_sum / n_speech if n_speech > 0 else 0
+    avg_silence = silence_rms_sum / (n_total - n_speech) if n_total > n_speech else 0
+
+    # Cleanup
+    for f in (chunk_file, wav_file):
+        if f.exists():
+            os.remove(f)
+
+    # Step 4: Report
+    print(f"  📊 VAD results:")
+    print(f"     Duration: {n_total * 30 / 1000:.1f}s ({n_total} frames)")
+    print(f"     Speech frames: {n_speech}/{n_total} ({pct:.1f}%)")
+    print(f"     Avg RMS (speech): {avg_speech:.0f}")
+    print(f"     Avg RMS (silence): {avg_silence:.0f}")
+
+    if pct < 5:
+        return False, f"VAD={pct:.1f}% — microphone may be picking up silence. Check mic permission."
+    elif pct < 20:
+        return True, f"VAD OK ({pct:.1f}% speech detected). Low ratio — speak louder/closer to mic."
+    else:
+        return True, f"VAD working correctly ({pct:.1f}% speech detected)."
+
 def test_mic(duration=1.0, out_path='/data/data/com.termux/files/home/jarvis-voice/mic_test.m4a'):
     """Quick mic test — records `duration` seconds and checks if file is created."""
     out = Path(out_path)
@@ -454,20 +619,48 @@ def test_mic(duration=1.0, out_path='/data/data/com.termux/files/home/jarvis-voi
     return True
 
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 if __name__ == "__main__":
     if len(sys.argv) == 2 and sys.argv[1] in ("--version", "-v"):
         print(f"jarvis-tui {__version__}")
         sys.exit(0)
 
-    if len(sys.argv) > 1 and sys.argv[1] in ("--test-mic", "--mic-test", "-t"):
-        import argparse
-        parser = argparse.ArgumentParser(description=f"Jarvis Voice TUI v{__version__} — mic test")
-        parser.add_argument("-d", "--duration", type=float, default=1.0)
-        parser.add_argument("-f", "--file", default="/data/data/com.termux/files/home/jarvis-voice/mic_test.m4a")
-        args, _ = parser.parse_known_args()
-        ok = test_mic(duration=args.duration, out_path=args.file)
-        sys.exit(0 if ok else 1)
+    if len(sys.argv) > 1:
+        if sys.argv[1] in ("--test-mic", "--mic-test", "-t"):
+            # Legacy mic test
+            import argparse
+            parser = argparse.ArgumentParser(description=f"Jarvis Voice TUI v{__version__} — mic test")
+            parser.add_argument("-d", "--duration", type=float, default=1.0)
+            parser.add_argument("-f", "--file", default="/data/data/com.termux/files/home/jarvis-voice/mic_test.m4a")
+            args, _ = parser.parse_known_args()
+            ok = test_mic(duration=args.duration, out_path=args.file)
+            sys.exit(0 if ok else 1)
+
+        elif sys.argv[1] in ("--test-vad", "--vad-test"):
+            # Full VAD pipeline test with microphone
+            print(f"Jarvis Voice TUI v{__version__} — VAD pipeline test (microphone required)")
+            print("=" * 50)
+            print("This will record 3 seconds from your microphone and run")
+            print("WebRTC VAD on the recording.")
+            print()
+            print("Press Enter to start recording (or Ctrl+C to cancel)...", end=" ", flush=True)
+            input()
+            ok, msg = test_mic_vad()
+
+        elif sys.argv[1] in ("--test-vad-synthetic", "--vad-synthetic"):
+            # VAD test on synthetic audio (no microphone needed)
+            print(f"Jarvis Voice TUI v{__version__} — VAD synthetic test (no microphone)")
+            print("=" * 50)
+            print("Testing WebRTC VAD on generated 1kHz sine wave.")
+            print("No microphone required.")
+            print()
+            ok, msg = test_vad_synthetic()
+            print()
+            if ok:
+                print(f"✅ PASS: {msg}")
+            else:
+                print(f"❌ FAIL: {msg}")
+            sys.exit(0 if ok else 1)
 
     JarvisTUI().run()
