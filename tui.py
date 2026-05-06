@@ -227,13 +227,21 @@ class VADLoop:
             time.sleep(0.6)  # record for ~600ms
             # Kill hard — sigkill ensures process dies immediately
             print("[vad] S4 killing record process", flush=True)
-            record_proc.kill()
+            # Try SIGTERM first (graceful — lets encoder flush audio to file)
+            record_proc.terminate()
             try:
-                record_proc.wait()
+                record_proc.wait(timeout=0.3)
+            except subprocess.TimeoutExpired:
+                # Still running after 300ms — SIGKILL
+                record_proc.kill()
+                try:
+                    record_proc.wait()
+                except Exception:
+                    pass
             except Exception:
                 pass
-            print("[vad] S5 filesystem flush (50ms)", flush=True)
-            time.sleep(0.05)  # let filesystem flush
+            print("[vad] S5 filesystem flush (100ms)", flush=True)
+            time.sleep(0.1)  # let filesystem flush
 
             # Check file was created
             if not chunk_file.exists():
@@ -242,21 +250,25 @@ class VADLoop:
 
             file_size = chunk_file.stat().st_size
             print(f"[vad] S6 chunk file size: {file_size}B", flush=True)
-            if file_size < 500:
+            if file_size < 1000:
                 print(f'[vad] skip: file too small ({file_size}B)')
                 continue  # too small, likely empty/broken
 
             # Convert to 16k mono PCM for VAD
             print(f"[vad] S7 running ffmpeg convert...", flush=True)
             try:
-                subprocess.run([
+                result = subprocess.run([
                     'ffmpeg', '-i', str(chunk_file),
                     '-ar', '16000', '-ac', '1', '-acodec', 'pcm_s16le',
                     '-frames:v', '0',
                     str(wav_file), '-y'
                 ], capture_output=True, timeout=5)
+                if result.returncode != 0:
+                    print(f'[vad] skip: ffmpeg failed rc={result.returncode} '
+                          f'stderr={result.stderr[:120]}')
+                    continue
             except Exception as e:
-                print(f'[vad] skip: ffmpeg error: {e}')
+                print(f'[vad] skip: ffmpeg exception: {e}')
                 continue
 
             if not wav_file.exists():
@@ -457,7 +469,7 @@ def test_mic(duration=1.0, out_path='/data/data/com.termux/files/home/jarvis-voi
     return True
 
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 if __name__ == "__main__":
     if len(sys.argv) == 2 and sys.argv[1] in ("--version", "-v"):
