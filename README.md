@@ -2,14 +2,12 @@
 
 **Always-on voice assistant** for Android (Termux) powered by OpenClaw. Listens for your voice, processes commands via AI, and speaks replies out loud.
 
-> "Hey Jarvis, what's the weather in London?"
-
 ---
 
 ## Features
 
 - 🎤 **Continuous voice monitoring** — WebRTC VAD detects when you start/stop speaking
-- 🤖 **OpenClaw AI** — sends transcribed commands to an OpenClaw sub-session for rich responses  
+- 🤖 **OpenClaw AI** — sends transcribed commands to an OpenClaw sub-session for rich responses
 - 🔊 **On-device TTS** — reads responses aloud via `termux-tts-speak` (no API keys)
 - 😊 **Animated emoji face** — shows current state (idle / listening / thinking / speaking)
 - 🌐 **No cloud dependencies** — runs entirely on-device (except OpenClaw gateway)
@@ -47,8 +45,11 @@ That's it. No PyTorch, no cloud API keys, no compilation.
 # Clone (or open the repo directory)
 cd ~/jarvis-voice
 
-# Install Python dependencies  
+# Install Python dependencies
 pip install -r requirements.txt
+
+# Run the mic test first to verify audio works
+python3 tui.py --test-mic
 
 # Configure (optional — defaults work for local OpenClaw)
 export JARVIS_GATEWAY_URL="http://localhost:18789"
@@ -61,164 +62,124 @@ python3 tui.py
 
 ---
 
-## Architecture
+## How it works
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                     Jarvis Voice TUI                        │
-│                                                             │
-│   🎤 Always-on loop                                         │
-│      ┌──────────────────────────────────────────────┐      │
-│      │  termux-mic-record → ffmpeg → WebRTC VAD     │      │
-│      │  (500ms chunks, 16k mono, 30ms frames)       │      │
-│      │                                               │      │
-│      │  Speech? → buffer audio                      │      │
-│      │  Silence (600ms)? → trigger wake ───────────┼──→   │
-│      └──────────────────────────────────────────────┘      │
-│                                                            │
-│   on_wake:                                                 │
-│      → termux-speech-to-text → transcribed text           │
-│      → OpenClaw sub-session → AI response                  │
-│      → termux-tts-speak → audio output                   │
-│      → animated emoji face state                          │
-└─────────────────────────────────────────────────────────────┘
+[Mic] ──► [WebRTC VAD always-on loop]
+              500ms chunks → 16k mono PCM → 30ms frames
+              Energy fallback (RMS > 800)
+              End of speech at ~2.5s silence
+                    │
+                    ▼
+         [termux-speech-to-text: Android STT]
+                    │
+                    ▼
+          [OpenClaw sub-session: jarvis-tui]
+                    │
+                    ▼
+        [termux-tts-speak + animated emoji face]
 ```
 
-### Key files
-
-| File | Purpose |
-|------|---------|
-| `tui.py` | Main entry point — full VAD loop + TUI |
-| `wakeword.py` | WebRTC VAD engine + fallback energy detection |
-| `stt.py` | STT engines (termux-speech-to-text, OpenAI Whisper, faster-whisper) |
-| `tts.py` | TTS engines (termux-tts-speak, ElevenLabs, OpenAI TTS) |
-| `face.py` | Animated ASCII/emoji face engine |
-| `audio.py` | Audio capture helpers |
-| `config.py` | Environment variable configuration |
+1. **VAD loop** — always-on, records 500ms chunks, runs through WebRTC VAD. Detects speech start + end of utterance (at ~2.5s natural pause)
+2. **STT** — `termux-speech-to-text` (Android's built-in, no API key)
+3. **AI response** — sends text to OpenClaw sub-session, gets reply
+4. **TTS** — speaks response via `termux-tts-speak`
+5. **Face** — animated emoji states in terminal
 
 ---
 
-## Wake Word Detection
+## VAD Tuning
 
-Jarvis uses **WebRTC VAD** (Voice Activity Detection) for always-on monitoring:
+The VAD is configured for natural conversation pauses:
 
-- Listens continuously via `termux-microphone-record`
-- Converts 500ms chunks to 16kHz mono PCM with ffmpeg
-- Feeds through WebRTC VAD (3 modes, 30ms frames)
-- Energy-based fallback when VAD fails on a frame
-- Detects end of speech at ~600ms consecutive silence
+| Parameter | Value | Meaning |
+|-----------|-------|---------|
+| Energy threshold | 800 RMS | Sensitivity for quiet speech |
+| Silence threshold | 5 frames (~2.5s) | Wait this long after speech ends to trigger |
+| Min speech frames | 2 frames (60ms) | Minimum speech to count as speaking |
 
-### Why not Silero VAD?
+### Why not "Hey Jarvis" wake phrase detection?
 
-Silero VAD is higher quality but requires **PyTorch** — which isn't available for Python 3.13 on Android ARM64 (no compatible wheels, build from source fails). WebRTC VAD is a solid fallback that works out of the box.
+This VAD responds to **any speech** — not a specific wake word. Say anything, pause for 2-3 seconds, and Jarvis processes it. A proper "Hey Jarvis" phrase detector (like Silero VAD's keyword spotting) would need PyTorch, which isn't available on this platform.
 
-### Wake word vs Push-to-talk
+---
 
-This is **always-on VAD** (listens continuously) — not push-to-talk. It detects when you start and stop speaking, so you don't need to hold a button. Say anything, pause, and Jarvis processes it.
+## Key files
+
+| File | Purpose |
+|------|---------|
+| `tui.py` | Main entry point — VAD loop + TUI + gateway integration |
+| `wakeword.py` | WebRTC VAD engine + energy fallback |
+| `stt.py` | STT engines (termux-api, OpenAI Whisper API) |
+| `tts.py` | TTS engines (termux-tts-speak, ElevenLabs, OpenAI TTS) |
+| `face.py` | Animated emoji face engine |
+| `config.py` | Environment variable configuration |
+| `requirements.txt` | Python dependencies |
 
 ---
 
 ## Speech-to-Text
 
-Primary: **`termux-speech-to-text`** (on-device Android speech recognition)
-- No API key needed
-- Uses Android's built-in speech recognizer
-- Opens as a system UI dialog
+**Primary:** `termux-speech-to-text` — on-device Android speech recognition, no API key needed.
 
-Fallback: OpenAI Whisper API (requires API key, configured via `OPENAI_API_KEY`)
+**Fallback:** OpenAI Whisper API (set `OPENAI_API_KEY`).
 
-### faster-whisper (offline)
-
-`faster-whisper` is a great offline option but **not currently available** on Python 3.13 / Android ARM64 — `ctranslate2` has no compatible wheel and building from source fails due to missing `spawn.h`. This may change with future Python/distro releases.
+> **Note:** `faster-whisper` is not available on Python 3.13 / Android ARM64 — `ctranslate2` has no compatible wheel.
 
 ---
 
 ## Text-to-Speech
 
-Primary: **`termux-tts-speak`** (on-device Android neural TTS)
-- No API key needed
-- Uses Android's built-in TTS engine
-- Configurable voices via `termux-tts-engines`
+**Primary:** `termux-tts-speak` — on-device Android neural TTS, no API key needed.
+Check available voices: `termux-tts-engines`
 
-Fallback: ElevenLabs or OpenAI TTS (requires API key)
+**Fallback:** ElevenLabs or OpenAI TTS (set API key in environment).
 
 ---
 
 ## OpenClaw Integration
 
-Jarvis TUI connects to OpenClaw as a **sub-session** (`agent:main:subagent:jarvis-tui`):
+Connects as a sub-session (`agent:main:subagent:jarvis-tui`):
 
-```python
-# Environment variables (or edit config.py)
-JARVIS_GATEWAY_URL="http://localhost:18789"
-JARVIS_AUTH_TOKEN="your-token"
-JARVIS_SESSION="agent:main:subagent:jarvis-tui"
+```bash
+export JARVIS_GATEWAY_URL="http://localhost:18789"
+export JARVIS_AUTH_TOKEN="your-token"
+export JARVIS_SESSION="agent:main:subagent:jarvis-tui"
 ```
-
-The sub-session inherits your OpenClaw configuration (model, skills, memory, etc.) while running as a separate session. Messages are sent via the gateway HTTP API and responses returned directly.
 
 ### Local fallback
 
-If OpenClaw is unreachable, a simple rule-based response generator runs locally:
-- "hello" → "Hello! How can I help you today?"
-- "time" → current time in London
-- "date" → today's date
-- "weather" → weather check prompt
-- "joke" → a joke
-- etc.
+If OpenClaw is unreachable, a rule-based response generator handles basic commands:
+`hello`, `how are you`, `your name`, `time`, `date`, `weather`, `joke`, `thank`, `bye`
 
 ---
 
 ## Running as a Service
 
-### On Android (Termux Boot or manual)
-
 ```bash
-# Start in background with nohup
-nohup python3 tui.py > Jarvis.log 2>&1 &
+# Background (survives terminal close)
+nohup python3 tui.py > jarvis.log 2>&1 &
 
-# Or use the provided shell script
-./jarvis.sh
-```
+# Watch log
+tail -f jarvis.log
 
-### On desktop/server
-
-The TUI can also run connected to a remote OpenClaw gateway:
-
-```bash
-JARVIS_GATEWAY_URL="http://192.168.1.100:18789" \
-JARVIS_AUTH_TOKEN="your-token" \
-JARVIS_SESSION="agent:main:subagent:desktop-jarvis" \
-python3 tui.py
+# Stop
+pkill -f tui.py
 ```
 
 ---
 
-## Development
+## Troubleshooting
 
-```bash
-# Clone the repo
-git clone https://github.com/strognoff/jarvis-voice.git
-cd jarvis-voice
+**`termux-api not found`** → `pkg install termux-api`
 
-# Install dev dependencies
-pip install -r requirements.txt
+**Mic test fails** → Grant microphone permission to Termux in Android Settings → Apps → Termux → Permissions
 
-# Run
-python3 tui.py
+**VAD not triggering** → Run with debug output enabled in tui.py (per-chunk RMS logging is already on every 5th iteration)
 
-# Run tests (placeholder)
-python3 wakeword.py  # tests VAD on existing audio file
-```
+**Gateway connection refused** → `openclaw gateway start`
 
-### Testing VAD without a microphone
-
-```bash
-# Test WebRTC VAD on the included sample (or any .ogg file)
-python3 wakeword.py
-```
-
-This runs VAD on an existing audio file and reports the speech ratio.
+**webrtcvad import error** → The package is pre-patched to remove a `pkg_resources` dependency. Reinstall if needed.
 
 ---
 
@@ -226,44 +187,35 @@ This runs VAD on an existing audio file and reports the speech ratio.
 
 | Issue | Cause | Workaround |
 |-------|-------|------------|
-| No `faster-whisper` | No ctranslate2 wheel for cp313 Android ARM64 | Use `termux-speech-to-text` or OpenAI Whisper API |
-| No `torch` / `silero-vad` | download.pytorch.org returns 403 | Use WebRTC VAD instead |
-| No `numpy` wheel | No cp313 Android ARM64 wheel | Energy fallback uses pure Python struct |
-| `termux-microphone-record` needs permission | Android audio permission | Grant microphone permission to Termux in Android settings |
+| No wake word phrase | No PyTorch for Silero VAD | VAD responds to any speech |
+| No `faster-whisper` | No ctranslate2 cp313 wheel | Use termux-speech-to-text |
+| No `torch` | download.pytorch.org blocked | WebRTC VAD instead |
+| No `numpy` | No cp313 Android ARM64 wheel | Pure Python RMS fallback |
 
 ---
 
 ## Project Status
 
 **Working:**
-- ✅ WebRTC VAD wake word detection
+- ✅ WebRTC VAD continuous monitoring
 - ✅ termux-speech-to-text STT
 - ✅ termux-tts-speak TTS
 - ✅ OpenClaw sub-session integration
 - ✅ Emoji face state display
 - ✅ Local fallback responses
+- ✅ `--test-mic` diagnostic flag
 
 **In progress:**
-- 🔄 Testing `termux-microphone-record` on real device
-- 🔄 Proper wake word phrase detection ("Hey Jarvis")
-- 🔄 Confidence threshold tuning
+- 🔄 VAD threshold tuning on real device
+- 🔄 End-of-utterance detection optimisation
 
 **Blocked:**
-- ❌ `faster-whisper` — no cp313 Android ARM64 ctranslate2 wheel
-- ❌ Silero VAD — no torch on this platform
-- ❌ numpy — no cp313 wheel (pure Python fallback used instead)
-
----
-
-## Contributing
-
-1. Fork the repo
-2. Create a feature branch  
-3. Make changes + test
-4. Push and open a PR
+- ❌ `faster-whisper` / ctranslate2 — no cp313 wheel
+- ❌ Silero VAD — no torch
+- ❌ True wake-word phrase detection
 
 ---
 
 ## License
 
-MIT — do whatever you want with it.
+MIT
