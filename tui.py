@@ -176,7 +176,7 @@ class VADLoop:
         """Record a short audio chunk using termux-microphone-record."""
         try:
             proc = subprocess.Popen(
-                ['termux-microphone-record', '-f', out_path, '-e', 'aac', '-b', '128', '-d'],
+                ['termux-microphone-record', '-f', out_path, '-l', str(int(duration))],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
             )
             time.sleep(duration_s)
@@ -221,16 +221,10 @@ class VADLoop:
             # Use lock so test functions can record without race conditions
             with _recording_lock:
                 record_proc = subprocess.Popen(
-                    ['termux-microphone-record', '-f', str(chunk_file), '-e', 'aac', '-b', '128', '-d'],
+                    ['termux-microphone-record', '-f', str(chunk_file), '-l', '1'],
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
                 )
-                time.sleep(0.6)  # record for ~600ms
-                record_proc.terminate()
-                try:
-                    record_proc.wait(timeout=0.5)
-                except subprocess.TimeoutExpired:
-                    record_proc.kill()
-                    record_proc.wait()
+                record_proc.wait()  # wait for -l to auto-exit after 1s
 
             # ── S4: Check file was created ─────────────────────────
             if not chunk_file.exists():
@@ -493,16 +487,10 @@ def test_mic_vad():
 
     with _recording_lock:
         record_proc = subprocess.Popen(
-            ['termux-microphone-record', '-f', str(chunk_file), '-e', 'aac', '-b', '128', '-d'],
+            ['termux-microphone-record', '-f', str(chunk_file), '-l', '3'],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
         )
-        time.sleep(3)  # record for exactly 3 seconds
-        record_proc.terminate()
-        try:
-            record_proc.wait(timeout=1)
-        except subprocess.TimeoutExpired:
-            record_proc.kill()
-            record_proc.wait()
+        record_proc.wait()  # wait for -l 3 to auto-exit
 
     if not chunk_file.exists():
         return False, "Microphone file not created — is Termux microphone permission granted? (Settings > Apps > Termux > Permissions > Microphone)"
@@ -601,12 +589,10 @@ def test_mic(duration=3.0, out_path='/data/data/com.termux/files/home/jarvis-voi
     print(f"🎤 Recording {duration}s... (speak clearly)")
     with _recording_lock:
         proc = subprocess.Popen(
-            ['termux-microphone-record', '-f', str(out), '-e', 'aac', '-b', '128', '-d'],
+            ['termux-microphone-record', '-f', str(out), '-l', str(int(duration))],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
         )
-        time.sleep(duration)
-        proc.terminate()
-        proc.wait()
+        proc.wait()  # wait for -l to auto-exit
 
     if not out.exists():
         print(f"❌ FAIL — file not created: {out}")
@@ -621,34 +607,16 @@ def test_mic(duration=3.0, out_path='/data/data/com.termux/files/home/jarvis-voi
 
     print(f"✅ Mic working! File: {out} ({size} bytes)")
 
-    # Play back the recording — try multiple players
+    # Play back the recording
     print(f"🔊 Playing back recording...")
-    played = False
-    # Boost volume: convert to wav, apply +20dB gain, then play
-    import tempfile
-    boosted = Path(tempfile.gettempdir()) / ("boosted_" + out.name + ".wav")
-    subprocess.run([
-        'ffmpeg', '-i', str(out), '-af', 'volume=20dB', '-ar', '16000', '-ac', '1',
-        str(boosted), '-y'
-    ], capture_output=True, timeout=15)
-
-    for player_cmd in [
-        ['ffplay', '-nodisp', '-autoexit', '-loglevel', 'quiet', str(boosted)],
+    play_result = subprocess.run(
         ['ffplay', '-nodisp', '-autoexit', '-loglevel', 'quiet', str(out)],
-        ['termux-media-player', 'play', str(boosted)],
-        ['mpv', '--no-video', '--idle=once', str(boosted)],
-    ]:
-        play_result = subprocess.run(
-            player_cmd, capture_output=True, timeout=int(duration + 5)
-        )
-        if play_result.returncode == 0:
-            played = True
-            print(f"   ✅ Played via {player_cmd[0]}")
-            break
+        capture_output=True, timeout=int(duration + 5)
+    )
+    if play_result.returncode != 0:
+        print(f"⚠️  Playback failed — audio saved at: {out}")
+        print(f"   Try: ffplay {out}")
 
-    if not played:
-        print(f"⚠️  Could not auto-play — try manually:")
-        print(f"   ffplay {out}")
         print(f"   termux-media-player play {out}")
         print(f"   Audio saved at: {out}")
 
@@ -665,7 +633,7 @@ def test_mic(duration=3.0, out_path='/data/data/com.termux/files/home/jarvis-voi
     return True
 
 
-__version__ = "0.8.0"
+__version__ = "1.4.0"
 
 if __name__ == "__main__":
     if len(sys.argv) == 2 and sys.argv[1] in ("--version", "-v"):
