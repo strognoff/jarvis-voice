@@ -1,251 +1,269 @@
-# Jarvis Voice TUI 🎙️🤖
+# Jarvis Voice TUI
 
-> Your always-on AI voice assistant — running on your phone, powered by OpenClaw.
+**Always-on voice assistant** for Android (Termux) powered by OpenClaw. Listens for your voice, processes commands via AI, and speaks replies out loud.
 
-Jarvis is a voice-first AI assistant that lives in your terminal. Say **"Hey Jarvis"** to talk to me — I'll listen, think, and speak back with a friendly animated face.
-
-Built for **Termux on Android**, no cloud API keys required for basic operation.
+> "Hey Jarvis, what's the weather in London?"
 
 ---
 
-## ✨ Features
+## Features
 
-- 🎤 **Always-on microphone** — listens for the "Hey Jarvis" wake word
-- 🗣️ **On-device STT** — uses Android's built-in `termux-speech-to-text` (free, no API key)
-- 🔊 **On-device TTS** — speaks responses via `termux-tts-speak` (Android neural voices)
-- 😊 **Animated emoji face** — shows emotion states in real-time
-- 🤖 **OpenClaw-powered AI** — runs as a persistent sub-session connected to your AI brain
-- 🌙 **Always listening** — runs 24/7 in the background on your phone
-- 📸 **Camera ready** — can take photos and send them back (permission required)
-
----
-
-## 🏗️ Architecture
-
-```
-┌─────────────────────────────────────────────────────────┐
-│                    Jarvis Voice TUI                     │
-├─────────────────────────────────────────────────────────┤
-│                                                         │
-│   🎤 Mic  ──►  🔔 Wake Word  ──►  🗣️ STT Engine       │
-│                            │           │                │
-│                            │           ▼                │
-│                      ┌─────┴─────┐                     │
-│                      │  OpenClaw │  (your AI brain)    │
-│                      │  Session  │                     │
-│                      └─────┬─────┘                     │
-│                            │                          │
-│                      ┌─────┴─────┐                     │
-│                      │    TTS    │  ──► 🔊 Speaker     │
-│                      └───────────┘                     │
-│                                                         │
-│   Face: 🤖 😊 🤔 🔊 😢 🎉 💤  (emoji emotion states)  │
-└─────────────────────────────────────────────────────────┘
-```
+- 🎤 **Continuous voice monitoring** — WebRTC VAD detects when you start/stop speaking
+- 🤖 **OpenClaw AI** — sends transcribed commands to an OpenClaw sub-session for rich responses  
+- 🔊 **On-device TTS** — reads responses aloud via `termux-tts-speak` (no API keys)
+- 😊 **Animated emoji face** — shows current state (idle / listening / thinking / speaking)
+- 🌐 **No cloud dependencies** — runs entirely on-device (except OpenClaw gateway)
+- 🔓 **Open source** — MIT licensed, self-hosted
 
 ---
 
-## 🚀 Quick Start
+## Requirements
 
-### 1. Install termux-api
+- **Android** with [Termux](https://termux.com/) installed
+- **Python 3.13+** (comes with Termux)
+- **termux-api** package (`pkg install termux-api`)
+- **OpenClaw** gateway running on the device (or accessible elsewhere)
+- **Internet** — for OpenClaw AI responses (or use the local fallback)
+
+### Termux packages needed
 
 ```bash
-pkg install termux-api
+pkg install termux-api python ffmpeg sox
 ```
 
-### 2. Clone the repo
-
-```bash
-cd /data/data/com.termux/files/home
-git clone https://github.com/strognoff/jarvis-voice
-cd jarvis-voice
-```
-
-### 3. Run
-
-```bash
-python3 tui.py
-```
-
-You'll see the animated Jarvis face. Say **"Hey Jarvis"** to activate — then speak your command.
-
----
-
-## 📱 Usage
-
-### Activation
-
-Say **"Hey Jarvis"** or press **Enter** to activate manual mode.
-
-### Voice Commands
-
-After activation, speak naturally. Examples:
-- *"Hey Jarvis, what's the weather in London?"*
-- *"Hey Jarvis, set a reminder for 5pm"*
-- *"Hey Jarvis, what's trending on X?"*
-- *"Hey Jarvis, tell me a joke"*
-
-### Exit
-
-Press **Ctrl+C** to gracefully shut down.
-
----
-
-## 🎭 Emotion States
-
-The face updates based on what Jarvis is doing:
-
-| State | Emoji | When |
-|-------|-------|------|
-| Idle | 🤖 | Waiting for "Hey Jarvis" |
-| Listening | 🎤 | Actively capturing speech |
-| Thinking | 🤔 | Processing your request |
-| Speaking | 🔊 | Speaking response aloud |
-| Happy | 😊 | Response complete |
-| Excited | 🎉 | Big news or celebration |
-| Sad | 😢 | Something went wrong |
-| Sleeping | 💤 | Going back to idle |
-| Error | ❌ | Error occurred |
-
----
-
-## ⚙️ Configuration
-
-### Environment Variables
-
-```bash
-# OpenClaw gateway URL (default: http://localhost:18789)
-export JARVIS_GATEWAY_URL="http://localhost:18789"
-
-# OpenClaw auth token (from gateway config)
-export JARVIS_AUTH_TOKEN="your-token-here"
-
-# STT engine: termux-api (default), openai, local
-export JARVIS_STT_ENGINE="termux-api"
-
-# TTS engine: termux-tts (default), elevenlabs, openai-tts
-export JARVIS_TTS_ENGINE="termux-tts"
-
-# Session key for the sub-agent
-export JARVIS_SESSION="agent:main:subagent:jarvis-tui"
-```
-
-### STT Engines
-
-| Engine | Description | API Key Needed? |
-|--------|-------------|-----------------|
-| `termux-api` | Android built-in speech-to-text | ❌ No |
-| `openai` | OpenAI Whisper API | ✅ Yes |
-| `local` | faster-whisper running locally | ❌ No |
-
-### TTS Engines
-
-| Engine | Description | API Key Needed? |
-|--------|-------------|-----------------|
-| `termux-tts` | Android built-in neural TTS | ❌ No |
-| `elevenlabs` | ElevenLabs expressive voices | ✅ Yes |
-| `openai-tts` | OpenAI TTS API | ✅ Yes |
-
----
-
-## 📁 Project Structure
-
-```
-jarvis-voice/
-├── tui.py              # Main TUI entry point
-├── jarvis.py           # Full app with all modules
-├── jarvis-simple.py    # Simple standalone version
-├── face.py             # Animated emoji face engine
-├── audio.py            # Audio capture (pyaudio / termux)
-├── wakeword.py         # Wake word detection (VAD)
-├── stt.py              # Speech-to-text engines
-├── tts.py              # Text-to-speech engines
-├── config.py           # Configuration management
-├── faces.txt           # Face sprite definitions
-├── requirements.txt    # Python dependencies
-├── jarvis.sh           # Shell launcher script
-└── README.md           # This file
-```
-
----
-
-## 🔧 Development
-
-### Install Python dependencies
+### Python dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### Run in verbose mode
+That's it. No PyTorch, no cloud API keys, no compilation.
+
+---
+
+## Quick Start
 
 ```bash
-python3 tui.py --verbose
-```
+# Clone (or open the repo directory)
+cd ~/jarvis-voice
 
-### Use a custom config
+# Install Python dependencies  
+pip install -r requirements.txt
 
-```bash
-python3 tui.py --config /path/to/config.json
+# Configure (optional — defaults work for local OpenClaw)
+export JARVIS_GATEWAY_URL="http://localhost:18789"
+export JARVIS_AUTH_TOKEN="your-gateway-token"
+export JARVIS_SESSION="agent:main:subagent:jarvis-tui"
+
+# Run!
+python3 tui.py
 ```
 
 ---
 
-## 🐛 Troubleshooting
+## Architecture
 
-### "termux-speech-to-text not found"
-
-```bash
-pkg install termux-api
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     Jarvis Voice TUI                        │
+│                                                             │
+│   🎤 Always-on loop                                         │
+│      ┌──────────────────────────────────────────────┐      │
+│      │  termux-mic-record → ffmpeg → WebRTC VAD     │      │
+│      │  (500ms chunks, 16k mono, 30ms frames)       │      │
+│      │                                               │      │
+│      │  Speech? → buffer audio                      │      │
+│      │  Silence (600ms)? → trigger wake ───────────┼──→   │
+│      └──────────────────────────────────────────────┘      │
+│                                                            │
+│   on_wake:                                                 │
+│      → termux-speech-to-text → transcribed text           │
+│      → OpenClaw sub-session → AI response                  │
+│      → termux-tts-speak → audio output                   │
+│      → animated emoji face state                          │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-### Microphone not working
+### Key files
 
-1. Go to **Android Settings → Apps → Termux → Permissions**
-2. Enable **Microphone** permission
-3. Also check **Termux:API** app permissions
+| File | Purpose |
+|------|---------|
+| `tui.py` | Main entry point — full VAD loop + TUI |
+| `wakeword.py` | WebRTC VAD engine + fallback energy detection |
+| `stt.py` | STT engines (termux-speech-to-text, OpenAI Whisper, faster-whisper) |
+| `tts.py` | TTS engines (termux-tts-speak, ElevenLabs, OpenAI TTS) |
+| `face.py` | Animated ASCII/emoji face engine |
+| `audio.py` | Audio capture helpers |
+| `config.py` | Environment variable configuration |
 
-### Camera not working
+---
 
-Same as above — grant camera permission to Termux:API.
+## Wake Word Detection
 
-### Gateway connection refused
+Jarvis uses **WebRTC VAD** (Voice Activity Detection) for always-on monitoring:
 
-Make sure OpenClaw gateway is running:
+- Listens continuously via `termux-microphone-record`
+- Converts 500ms chunks to 16kHz mono PCM with ffmpeg
+- Feeds through WebRTC VAD (3 modes, 30ms frames)
+- Energy-based fallback when VAD fails on a frame
+- Detects end of speech at ~600ms consecutive silence
 
-```bash
-openclaw gateway status
+### Why not Silero VAD?
+
+Silero VAD is higher quality but requires **PyTorch** — which isn't available for Python 3.13 on Android ARM64 (no compatible wheels, build from source fails). WebRTC VAD is a solid fallback that works out of the box.
+
+### Wake word vs Push-to-talk
+
+This is **always-on VAD** (listens continuously) — not push-to-talk. It detects when you start and stop speaking, so you don't need to hold a button. Say anything, pause, and Jarvis processes it.
+
+---
+
+## Speech-to-Text
+
+Primary: **`termux-speech-to-text`** (on-device Android speech recognition)
+- No API key needed
+- Uses Android's built-in speech recognizer
+- Opens as a system UI dialog
+
+Fallback: OpenAI Whisper API (requires API key, configured via `OPENAI_API_KEY`)
+
+### faster-whisper (offline)
+
+`faster-whisper` is a great offline option but **not currently available** on Python 3.13 / Android ARM64 — `ctranslate2` has no compatible wheel and building from source fails due to missing `spawn.h`. This may change with future Python/distro releases.
+
+---
+
+## Text-to-Speech
+
+Primary: **`termux-tts-speak`** (on-device Android neural TTS)
+- No API key needed
+- Uses Android's built-in TTS engine
+- Configurable voices via `termux-tts-engines`
+
+Fallback: ElevenLabs or OpenAI TTS (requires API key)
+
+---
+
+## OpenClaw Integration
+
+Jarvis TUI connects to OpenClaw as a **sub-session** (`agent:main:subagent:jarvis-tui`):
+
+```python
+# Environment variables (or edit config.py)
+JARVIS_GATEWAY_URL="http://localhost:18789"
+JARVIS_AUTH_TOKEN="your-token"
+JARVIS_SESSION="agent:main:subagent:jarvis-tui"
 ```
 
-If not running, start it:
+The sub-session inherits your OpenClaw configuration (model, skills, memory, etc.) while running as a separate session. Messages are sent via the gateway HTTP API and responses returned directly.
+
+### Local fallback
+
+If OpenClaw is unreachable, a simple rule-based response generator runs locally:
+- "hello" → "Hello! How can I help you today?"
+- "time" → current time in London
+- "date" → today's date
+- "weather" → weather check prompt
+- "joke" → a joke
+- etc.
+
+---
+
+## Running as a Service
+
+### On Android (Termux Boot or manual)
 
 ```bash
-openclaw gateway start
+# Start in background with nohup
+nohup python3 tui.py > Jarvis.log 2>&1 &
+
+# Or use the provided shell script
+./jarvis.sh
+```
+
+### On desktop/server
+
+The TUI can also run connected to a remote OpenClaw gateway:
+
+```bash
+JARVIS_GATEWAY_URL="http://192.168.1.100:18789" \
+JARVIS_AUTH_TOKEN="your-token" \
+JARVIS_SESSION="agent:main:subagent:desktop-jarvis" \
+python3 tui.py
 ```
 
 ---
 
-## 🌟 What's Next
+## Development
 
-- [ ] **Wake word detection** — proper "Hey Jarvis" hotword detection (Porcupine / openwakeword)
-- [ ] **Voice activity detection (VAD)** — auto-trigger listening without pressing Enter
-- [ ] **OpenClaw AI integration** — full AI responses via OpenClaw session instead of local echo
-- [ ] **Telegram bridge** — control Jarvis remotely via Telegram bot
-- [ ] **Bluetooth headset support** — use BT mic for truly wireless operation
-- [ ] **Custom wake words** — train your own wake word model
+```bash
+# Clone the repo
+git clone https://github.com/strognoff/jarvis-voice.git
+cd jarvis-voice
+
+# Install dev dependencies
+pip install -r requirements.txt
+
+# Run
+python3 tui.py
+
+# Run tests (placeholder)
+python3 wakeword.py  # tests VAD on existing audio file
+```
+
+### Testing VAD without a microphone
+
+```bash
+# Test WebRTC VAD on the included sample (or any .ogg file)
+python3 wakeword.py
+```
+
+This runs VAD on an existing audio file and reports the speech ratio.
 
 ---
 
-## 📜 License
+## Known Limitations
+
+| Issue | Cause | Workaround |
+|-------|-------|------------|
+| No `faster-whisper` | No ctranslate2 wheel for cp313 Android ARM64 | Use `termux-speech-to-text` or OpenAI Whisper API |
+| No `torch` / `silero-vad` | download.pytorch.org returns 403 | Use WebRTC VAD instead |
+| No `numpy` wheel | No cp313 Android ARM64 wheel | Energy fallback uses pure Python struct |
+| `termux-microphone-record` needs permission | Android audio permission | Grant microphone permission to Termux in Android settings |
+
+---
+
+## Project Status
+
+**Working:**
+- ✅ WebRTC VAD wake word detection
+- ✅ termux-speech-to-text STT
+- ✅ termux-tts-speak TTS
+- ✅ OpenClaw sub-session integration
+- ✅ Emoji face state display
+- ✅ Local fallback responses
+
+**In progress:**
+- 🔄 Testing `termux-microphone-record` on real device
+- 🔄 Proper wake word phrase detection ("Hey Jarvis")
+- 🔄 Confidence threshold tuning
+
+**Blocked:**
+- ❌ `faster-whisper` — no cp313 Android ARM64 ctranslate2 wheel
+- ❌ Silero VAD — no torch on this platform
+- ❌ numpy — no cp313 wheel (pure Python fallback used instead)
+
+---
+
+## Contributing
+
+1. Fork the repo
+2. Create a feature branch  
+3. Make changes + test
+4. Push and open a PR
+
+---
+
+## License
 
 MIT — do whatever you want with it.
-
----
-
-## 🙏 Credits
-
-Built with ❤️ for Termux on Android.
-
-Powered by [OpenClaw](https://openclaw.ai/) — the open-source AI assistant framework.
-
-Python + termux-api + a lot of coffee ☕
