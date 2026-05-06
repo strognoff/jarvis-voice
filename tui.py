@@ -30,7 +30,7 @@ MEMORY_DIR    = "/data/data/com.termux/files/home/.openclaw/memory"
 # Audio settings  
 SAMPLE_RATE   = 16000
 FRAME_DURATION_MS = 30  # 30ms WebRTC standard
-ENERGY_THRESHOLD  = 2000
+ENERGY_THRESHOLD  = 800
 
 # ── WebRTC VAD ──────────────────────────────────────────────────────
 try:
@@ -184,7 +184,7 @@ class VADLoop:
         except Exception as e:
             log(f"record error: {e}")
 
-    def vad_loop(self, on_wake, silence_threshold_frames=20):
+    def vad_loop(self, on_wake, silence_threshold_frames=5):
         """
         Main loop: record small chunks → read PCM → VAD check.
         When speech ends (silence_threshold_frames consecutive silence),
@@ -251,8 +251,8 @@ class VADLoop:
             if self.vad:
                 try:
                     is_speech = self.vad.is_speech(chunk_data, self.sample_rate, num_samples)
-                except Exception:
-                    pass
+                except Exception as e:
+                    pass  # VAD threw on this chunk, fall through to energy
 
             # Energy fallback
             rms = compute_rms(chunk_data)
@@ -260,6 +260,12 @@ class VADLoop:
                 is_speech = True
 
             # ── State machine ─────────────────────────────────────────
+            # Debug log every 5th iteration
+            if getattr(self, '_debug_ctr', 0) % 5 == 0:
+                log(f"  VAD chunk: RMS={rms:.0f} threshold={threshold}, is_speech={is_speech}, "
+                    f"speech_buf={len(speech_buffer)//64}f")
+            self._debug_ctr = getattr(self, '_debug_ctr', 0) + 1
+
             if is_speech:
                 speech_frames += 1
                 silence_frames = 0
@@ -427,7 +433,7 @@ if __name__ == "__main__":
         parser = argparse.ArgumentParser(description='Jarvis Voice TUI — mic test')
         parser.add_argument('-d', '--duration', type=float, default=1.0)
         parser.add_argument('-f', '--file', default='/data/data/com.termux/files/home/jarvis-voice/mic_test.m4a')
-        args = parser.parse_args()
+        args, _ = parser.parse_known_args()   # parse_known_args avoids fail on --test-mic
         ok = test_mic(duration=args.duration, out_path=args.file)
         sys.exit(0 if ok else 1)
 
