@@ -205,30 +205,46 @@ class VADLoop:
 
         while self.running:
             # ── Record a ~500ms chunk ────────────────────────────────
+            # Remove old chunk file first
             if chunk_file.exists():
                 try:
                     os.remove(chunk_file)
                 except Exception:
                     pass
+            if wav_file.exists():
+                try:
+                    os.remove(wav_file)
+                except Exception:
+                    pass
 
+            # Start recording (no -d flag — record until we kill it)
             record_proc = subprocess.Popen(
                 ['termux-microphone-record', '-f', str(chunk_file)],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
             )
-            time.sleep(0.5)
-            record_proc.terminate()
-            record_proc.wait()
+            time.sleep(0.6)  # record for ~600ms
+            # Kill hard — sigkill ensures process dies immediately
+            record_proc.kill()
+            try:
+                record_proc.wait()
+            except Exception:
+                pass
+            time.sleep(0.05)  # let filesystem flush
 
-            # Convert to 16k mono PCM for VAD
+            # Check file was created
             if not chunk_file.exists():
-                time.sleep(0.1)
                 continue
 
+            file_size = chunk_file.stat().st_size
+            if file_size < 500:
+                continue  # too small, likely empty/broken
+
+            # Convert to 16k mono PCM for VAD
             try:
                 subprocess.run([
                     'ffmpeg', '-i', str(chunk_file),
                     '-ar', '16000', '-ac', '1', '-acodec', 'pcm_s16le',
-                    '-frames:v', '0',    # all frames
+                    '-frames:v', '0',
                     str(wav_file), '-y'
                 ], capture_output=True, timeout=5)
             except Exception as e:
@@ -237,6 +253,7 @@ class VADLoop:
 
             if not wav_file.exists():
                 continue
+
 
             with wave.open(str(wav_file), 'rb') as wf:
                 chunk_data = wf.readframes(wf.getnframes())
