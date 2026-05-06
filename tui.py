@@ -530,7 +530,7 @@ def _kill_existing_recording():
                    capture_output=True, timeout=5)
     time.sleep(0.5)
 
-def test_mic(duration=3.0, out_path='/data/data/com.termux/files/home/jarvis-voice/mic_test.m4a'):
+def test_mic(duration=3.0, out_path='/data/data/com.termux/files/home/jarvis-voice/mic_test.wav'):
     """Quick mic test — records `duration` seconds, checks file, plays it back."""
     out = Path(out_path)
     if out.exists():
