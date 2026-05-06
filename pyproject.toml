@@ -1,0 +1,48 @@
+[project]
+name = "jarvis-voice"
+version = "0.1.0"
+description = "Jarvis Voice TUI — always-on AI voice assistant powered by OpenClaw"
+readme = "README.md"
+authors = [{name = "Jarvis AI", email = "jarvis@openclaw.ai"}]
+license = {text = "MIT"}
+requires-python = ">=3.10"
+keywords = ["voice", "assistant", "tts", "stt", "openclaw", "termux", "android"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: Android :: Termux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+[project.optional-dependencies]
+openai = ["requests"]
+elevenlabs = ["requests"]
+dev = ["pytest", "black", "ruff"]
+
+[project.scripts]
+jarvis = "jarvis.__main__:main"
+jarvis-tui = "jarvis.tui:main"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["jarvis", "jarvis.modules"]
+
+[tool.setuptools.package-data]
+jarvis = ["faces.txt"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.black]
+line-length = 100
+target-version = ["py310", "py311", "py312"]
