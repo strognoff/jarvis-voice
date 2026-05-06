@@ -201,8 +201,7 @@ class VADLoop:
         min_silence = silence_threshold_frames  # ~600ms silence = end of utterance
         is_speaking = False
         last_size = 0
-
-        ENERGY_THRESHOLD = ENERGY_THRESHOLD  # from config
+        threshold = ENERGY_THRESHOLD  # local alias, avoids late binding issues in loops
 
         while self.running:
             # ── Record a ~500ms chunk ────────────────────────────────
@@ -257,7 +256,7 @@ class VADLoop:
 
             # Energy fallback
             rms = compute_rms(chunk_data)
-            if rms > ENERGY_THRESHOLD:
+            if rms > threshold:
                 is_speech = True
 
             # ── State machine ─────────────────────────────────────────
