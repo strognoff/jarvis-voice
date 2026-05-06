@@ -379,5 +379,56 @@ class JarvisTUI:
             self.running = False
 
 
+def test_mic(duration=1.0, out_path='/data/data/com.termux/files/home/jarvis-voice/mic_test.m4a'):
+    """Quick mic test — records `duration` seconds and checks if file is created."""
+    out = Path(out_path)
+    if out.exists():
+        out.unlink()
+
+    print(f"🎤 Recording {duration}s...")
+
+    proc = subprocess.Popen(
+        ['termux-microphone-record', '-f', str(out), '-d'],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+    )
+    time.sleep(duration)
+    proc.terminate()
+    proc.wait()
+
+    if not out.exists():
+        print(f"❌ FAIL — file not created: {out}")
+        print("   → Is termux-api installed? (pkg install termux-api)")
+        print("   → Does Termux have microphone permission?")
+        return False
+
+    size = out.stat().st_size
+    if size < 100:
+        print(f"❌ FAIL — file too small ({size} bytes), likely empty recording")
+        return False
+
+    print(f"✅ Mic working! File: {out} ({size} bytes)")
+
+    # Quick ffprobe check
+    probe = subprocess.run(
+        ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_format', str(out)],
+        capture_output=True, text=True, timeout=10
+    )
+    if probe.returncode == 0:
+        import json
+        info = json.loads(probe.stdout)
+        dur = info.get('format', {}).get('duration', '?')
+        print(f"   Duration: {float(dur):.1f}s")
+    return True
+
+
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] in ('--test-mic', '--mic-test', '-t'):
+        import argparse
+        parser = argparse.ArgumentParser(description='Jarvis Voice TUI — mic test')
+        parser.add_argument('-d', '--duration', type=float, default=1.0)
+        parser.add_argument('-f', '--file', default='/data/data/com.termux/files/home/jarvis-voice/mic_test.m4a')
+        args = parser.parse_args()
+        ok = test_mic(duration=args.duration, out_path=args.file)
+        sys.exit(0 if ok else 1)
+
     JarvisTUI().run()
