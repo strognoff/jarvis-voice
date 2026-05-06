@@ -176,7 +176,7 @@ class VADLoop:
         """Record a short audio chunk using termux-microphone-record."""
         try:
             proc = subprocess.Popen(
-                ['termux-microphone-record', '-f', out_path, '-l', str(int(duration))],
+                ['termux-microphone-record', '-f', out_path, '-d'],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
             )
             time.sleep(duration_s)
@@ -221,10 +221,16 @@ class VADLoop:
             # Use lock so test functions can record without race conditions
             with _recording_lock:
                 record_proc = subprocess.Popen(
-                    ['termux-microphone-record', '-f', str(chunk_file), '-l', '1'],
+                    ['termux-microphone-record', '-f', str(chunk_file), '-d'],
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
                 )
-                record_proc.wait()  # wait for -l to auto-exit after 1s
+                time.sleep(0.6)
+                record_proc.terminate()
+                try:
+                    record_proc.wait(timeout=0.5)
+                except subprocess.TimeoutExpired:
+                    record_proc.kill()
+                    record_proc.wait()
 
             # ── S4: Check file was created ─────────────────────────
             if not chunk_file.exists():
@@ -487,10 +493,16 @@ def test_mic_vad():
 
     with _recording_lock:
         record_proc = subprocess.Popen(
-            ['termux-microphone-record', '-f', str(chunk_file), '-l', '3'],
+            ['termux-microphone-record', '-f', str(chunk_file), '-d'],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
         )
-        record_proc.wait()  # wait for -l 3 to auto-exit
+        time.sleep(3)
+        record_proc.terminate()
+        try:
+            record_proc.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            record_proc.kill()
+            record_proc.wait()
 
     if not chunk_file.exists():
         return False, "Microphone file not created — is Termux microphone permission granted? (Settings > Apps > Termux > Permissions > Microphone)"
@@ -589,10 +601,16 @@ def test_mic(duration=3.0, out_path='/data/data/com.termux/files/home/jarvis-voi
     print(f"🎤 Recording {duration}s... (speak clearly)")
     with _recording_lock:
         proc = subprocess.Popen(
-            ['termux-microphone-record', '-f', str(out), '-l', str(int(duration))],
+            ['termux-microphone-record', '-f', str(out), '-d'],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
         )
-        proc.wait()  # wait for -l to auto-exit
+        time.sleep(duration)
+        proc.terminate()
+        try:
+            proc.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
 
     if not out.exists():
         print(f"❌ FAIL — file not created: {out}")
