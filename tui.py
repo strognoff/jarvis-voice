@@ -2,11 +2,11 @@
 """
 tui.py — Jarvis Voice TUI for OpenClaw
 
-Always-on voice assistant that:
-- Listens for "Hey Jarvis" wake word
-- Captures speech via termux-speech-to-text
-- Sends to OpenClaw sub-session for AI response
-- Speaks back via termux-tts-speak with animated emoji face
+Always-on voice assistant:
+- Uses termux-microphone-record (looped) + WebRTC VAD for continuous monitoring
+- Detects end-of-speech → triggers termux-speech-to-text
+- Sends to OpenClaw sub-session → speaks back via termux-tts-speak
+- Animated emoji face state display
 
 Run: python3 tui.py
 """
@@ -16,69 +16,54 @@ import os
 import time
 import subprocess
 import threading
-import json
-import requests
-from datetime import datetime
+import wave
+import struct
+from pathlib import Path
 
-# ── Config ───────────────────────────────────────────────────────────
+# ── Config ─────────────────────────────────────────────────────────
 GATEWAY_URL   = os.environ.get("JARVIS_GATEWAY_URL", "http://localhost:18789")
 AUTH_TOKEN    = os.environ.get("JARVIS_AUTH_TOKEN", "")
 SESSION_KEY   = os.environ.get("JARVIS_SESSION",    "agent:main:subagent:jarvis-tui")
-STT_ENGINE    = os.environ.get("JARVIS_STT_ENGINE", "termux-api")
-TTS_ENGINE    = os.environ.get("JARVIS_TTS_ENGINE", "termux-tts")
 SESSION_DIR   = "/data/data/com.termux/files/home/.openclaw/agents/main/sessions"
 MEMORY_DIR    = "/data/data/com.termux/files/home/.openclaw/memory"
 
+# Audio settings  
+SAMPLE_RATE   = 16000
+FRAME_DURATION_MS = 30  # 30ms WebRTC standard
+ENERGY_THRESHOLD  = 2000
+
+# ── WebRTC VAD ──────────────────────────────────────────────────────
+try:
+    import webrtcvad
+    HAS_VAD = True
+except ImportError:
+    HAS_VAD = False
+
+# ── Helpers (no numpy) ─────────────────────────────────────────────
+def compute_rms(audio_bytes: bytes) -> float:
+    """Compute RMS energy of 16-bit PCM without numpy."""
+    n = len(audio_bytes) // 2
+    if n == 0:
+        return 0.0
+    total = 0
+    for i in range(0, len(audio_bytes) - 1, 2):
+        s = struct.unpack_from('<h', audio_bytes, i)[0]
+        total += s * s
+    return (total / n) ** 0.5
+
 # ── Face Emojis ─────────────────────────────────────────────────────
 FACES = {
-    "start":    "🤖",
-    "idle":     "🤖",
+    "idle":      "🤖",
     "listening": "🎤",
-    "thinking": "🤔",
-    "speaking": "🔊",
-    "happy":    "😊",
-    "excited":  "🎉",
-    "sad":      "😢",
-    "angry":    "😠",
-    "sleeping": "💤",
-    "error":    "❌",
+    "thinking":  "🤔",
+    "speaking":  "🔊",
+    "happy":     "😊",
+    "done":      "✅",
+    "error":     "❌",
 }
 
-# ── Helpers ──────────────────────────────────────────────────────────
 def log(msg):
     print(f"[jarvis-tui] {msg}", flush=True)
-
-def render(face: str, status: str = ""):
-    emoji = FACES.get(face, FACES["idle"])
-    status_line = f"  {status}" if status else ""
-    print(f"\r  {emoji}{status_line}  ", end="", flush=True)
-
-def speak(text: str):
-    """Use termux-tts-speak to say something."""
-    try:
-        subprocess.run(
-            ["termux-tts-speak", text],
-            capture_output=True, timeout=15
-        )
-    except Exception as e:
-        log(f"TTS error: {e}")
-
-def listen() -> str:
-    """Use termux-speech-to-text to capture and transcribe speech."""
-    try:
-        result = subprocess.run(
-            ["termux-speech-to-text"],
-            capture_output=True, text=True, timeout=15
-        )
-        return result.stdout.strip()
-    except subprocess.TimeoutExpired:
-        return ""
-    except Exception as e:
-        log(f"STT error: {e}")
-        return ""
-
-def clear_line():
-    print("\r" + " " * 60 + "\r", end="")
 
 def print_banner():
     print()
@@ -87,117 +72,313 @@ def print_banner():
     print("  ╚══════════════════════════════════════╝")
     print()
 
-# ── OpenClaw Gateway API ────────────────────────────────────────────
-def gateway_request(method: str, path: str, data=None, params=None):
-    """Make an authenticated request to the OpenClaw gateway."""
-    url = f"{GATEWAY_URL}{path}"
-    headers = {"Authorization": f"Bearer {AUTH_TOKEN}"}
+def render(face, status=""):
+    emoji = FACES.get(face, FACES["idle"])
+    line = f"\r  {emoji} {status}" if status else f"\r  {emoji}"
+    print(line + " " * 20, end="", flush=True)
+
+def speak(text: str):
     try:
-        if method == "GET":
-            resp = requests.get(url, headers=headers, params=params, timeout=30)
-        elif method == "POST":
-            resp = requests.post(url, headers=headers, json=data, timeout=60)
-        resp.raise_for_status()
-        return resp.json()
+        subprocess.run(["termux-tts-speak", text], capture_output=True, timeout=20)
+    except Exception as e:
+        log(f"TTS error: {e}")
+
+def listen() -> str:
+    """Use termux-speech-to-text to capture and transcribe speech."""
+    try:
+        result = subprocess.run(
+            ["termux-speech-to-text"],
+            capture_output=True, text=True, timeout=20
+        )
+        return result.stdout.strip()
+    except subprocess.TimeoutExpired:
+        return ""
+    except Exception as e:
+        log(f"STT error: {e}")
+        return ""
+
+def save_wav(path, audio_data, sample_rate=SAMPLE_RATE):
+    with wave.open(str(path), 'wb') as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        wf.writeframes(audio_data)
+
+# ── OpenClaw Gateway ────────────────────────────────────────────────
+def send_message(session_key: str, text: str) -> str:
+    import requests
+    url = f"{GATEWAY_URL}/sessions/{session_key}/messages"
+    try:
+        resp = requests.post(
+            url,
+            headers={"Authorization": f"Bearer {AUTH_TOKEN}"},
+            json={"kind": "text", "content": text,
+                  "sender": {"id": "jarvis-tui", "label": "jarvis-tui"}},
+            timeout=60
+        )
+        if resp.status_code == 200:
+            result = resp.json()
+            return result.get("reply", "")
     except Exception as e:
         log(f"Gateway error: {e}")
-        return None
-
-def send_message(session_key: str, text: str) -> str:
-    """Send a message to an OpenClaw session and return the response text."""
-    payload = {
-        "kind": "text",
-        "content": text,
-        "sender": {
-            "id": "jarvis-tui",
-            "label": "jarvis-tui",
-        }
-    }
-    result = gateway_request("POST", f"/sessions/{session_key}/messages", data=payload)
-    if result and "reply" in result:
-        return result["reply"]
     return ""
 
-def get_session_messages(session_key: str, limit: int = 5):
-    """Get recent messages from a session."""
-    return gateway_request("GET", f"/sessions/{session_key}/messages", params={"limit": limit})
+def get_response(text: str) -> str:
+    """Local fallback response generator."""
+    t = text.lower().strip()
+    if any(g in t for g in ["hello", "hi", "hey"]):
+        return "Hello! I'm Jarvis. What can I do for you today?"
+    elif "how are you" in t:
+        return "I'm doing great, thank you for asking!"
+    elif any(g in t for g in ["your name", "who are you"]):
+        return "I'm Jarvis, your personal AI assistant."
+    elif "time" in t:
+        from datetime import datetime
+        return f"It's {datetime.now().strftime('%I:%M %p')} in London."
+    elif "date" in t:
+        from datetime import datetime
+        return f"Today is {datetime.now().strftime('%A, %B %d')}"
+    elif "weather" in t:
+        return "I can check the weather for you. Which location?"
+    elif "joke" in t:
+        return "Why did the AI cross the road? To get to the other side of the neural network!"
+    elif "thank" in t:
+        return "You're welcome!"
+    elif any(g in t for g in ["bye", "goodbye"]):
+        return "Goodbye! I'll be here when you need me."
+    else:
+        return "Got it. Let me think about that."
 
-# ── Memory ───────────────────────────────────────────────────────────
-def load_memory(key: str) -> str:
-    path = os.path.join(MEMORY_DIR, f"{key}.md")
-    if os.path.exists(path):
-        with open(path) as f:
-            return f.read()
-    return ""
-
-def save_memory(key: str, content: str):
-    os.makedirs(MEMORY_DIR, exist_ok=True)
-    path = os.path.join(MEMORY_DIR, f"{key}.md")
-    with open(path, "w") as f:
-        f.write(content)
-
-# ── Main TUI Loop ────────────────────────────────────────────────────
-def main():
-    print_banner()
+# ── VAD Capture Loop ────────────────────────────────────────────────
+class VADLoop:
+    """
+    WebRTC VAD loop using termux-microphone-record.
     
-    # Check termux-api
-    log("Checking termux-api...")
-    try:
-        subprocess.run(["termux-tts-engines"], capture_output=True, timeout=5)
-    except FileNotFoundError:
-        print("  ❌ termux-api not found! Install with: pkg install termux-api")
-        sys.exit(1)
-    
-    log(f"Gateway: {GATEWAY_URL}")
-    log(f"Session: {SESSION_KEY}")
-    log(f"STT: {STT_ENGINE} | TTS: {TTS_ENGINE}")
-    log("Ready! Say 'Hey Jarvis' to activate...")
-    print()
+    Records audio to a rotating temp file, reads it in 30ms chunks,
+    feeds through VAD. On speech-end detected, triggers callback.
+    """
 
-    state = "idle"
-    consecutive_empty = 0
-    max_empty = 2
+    def __init__(self, sample_rate=SAMPLE_RATE):
+        self.sample_rate = sample_rate
+        self.frame_size = int(sample_rate * FRAME_DURATION_MS / 1000) * 2  # bytes
+        self.running = False
+        self.vad = None
 
-    try:
-        while True:
-            if state == "idle":
-                # Just show idle face
-                render("idle", "Say 'Hey Jarvis' to activate...")
-                time.sleep(0.5)
+        if HAS_VAD:
+            self.vad = webrtcvad.Vad(mode=3)
+            self.vad.set_mode(3)
+            log(f"WebRTC VAD initialised (mode 3)")
+        else:
+            log("WARNING: WebRTC VAD not available — using energy-only fallback")
 
-                # For demo/testing: simulate wake word on any keypress
-                # In production, this would be a proper wake word detector
-                # For now, we use termux-speech-to-text in a loop
-                # that gets triggered by the user manually or via some audio VAD
+    def _record_chunk(self, out_path: str, duration_s: float):
+        """Record a short audio chunk using termux-microphone-record."""
+        try:
+            proc = subprocess.Popen(
+                ['termux-microphone-record', '-f', out_path, '-d'],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+            time.sleep(duration_s)
+            proc.terminate()
+            proc.wait()
+        except Exception as e:
+            log(f"record error: {e}")
 
-            elif state == "listening":
-                render("listening", "Listening...")
-                time.sleep(1)
+    def vad_loop(self, on_wake, silence_threshold_frames=20):
+        """
+        Main loop: record small chunks → read PCM → VAD check.
+        When speech ends (silence_threshold_frames consecutive silence),
+        trigger on_wake callback with the speech audio captured so far.
+        """
+        work_dir = Path("/data/data/com.termux/files/home/jarvis-voice")
+        chunk_file = work_dir / "vad_chunk.m4a"
+        wav_file = work_dir / "vad_chunk.wav"
 
-            elif state == "thinking":
-                render("thinking", "Thinking...")
-                time.sleep(0.5)
+        speech_buffer = b""
+        speech_frames = 0
+        silence_frames = 0
+        min_speech = 2      # min frames of actual speech to trigger wake
+        min_silence = silence_threshold_frames  # ~600ms silence = end of utterance
+        is_speaking = False
+        last_size = 0
 
-            elif state == "speaking":
-                render("speaking")
-                time.sleep(0.5)
+        ENERGY_THRESHOLD = ENERGY_THRESHOLD  # from config
 
-            # Poll for audio input in idle state
-            # We use a non-blocking approach: try termux-speech-to-text
-            # The user activates it by speaking "Hey Jarvis"
-            # For demo: let's try a short listen and check for wake phrase
-            
-            # In a real implementation, this would be running
-            # a wake word detector on the audio stream continuously.
-            # Here we just loop and try to listen when user presses Enter
-            # or we can do a quick audio check every few seconds.
+        while self.running:
+            # ── Record a ~500ms chunk ────────────────────────────────
+            if chunk_file.exists():
+                try:
+                    os.remove(chunk_file)
+                except Exception:
+                    pass
 
-            time.sleep(0.2)
+            record_proc = subprocess.Popen(
+                ['termux-microphone-record', '-f', str(chunk_file)],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+            time.sleep(0.5)
+            record_proc.terminate()
+            record_proc.wait()
 
-    except KeyboardInterrupt:
-        print("\n\n  👋 Shutting down Jarvis TUI...")
-        render("idle", "Goodbye!")
+            # Convert to 16k mono PCM for VAD
+            if not chunk_file.exists():
+                time.sleep(0.1)
+                continue
+
+            try:
+                subprocess.run([
+                    'ffmpeg', '-i', str(chunk_file),
+                    '-ar', '16000', '-ac', '1', '-acodec', 'pcm_s16le',
+                    '-frames:v', '0',    # all frames
+                    str(wav_file), '-y'
+                ], capture_output=True, timeout=5)
+            except Exception as e:
+                log(f"ffmpeg convert error: {e}")
+                continue
+
+            if not wav_file.exists():
+                continue
+
+            with wave.open(str(wav_file), 'rb') as wf:
+                chunk_data = wf.readframes(wf.getnframes())
+
+            if not chunk_data:
+                continue
+
+            # ── VAD check on this chunk ───────────────────────────────
+            num_samples = len(chunk_data) // 2
+            is_speech = False
+
+            if self.vad:
+                try:
+                    is_speech = self.vad.is_speech(chunk_data, self.sample_rate, num_samples)
+                except Exception:
+                    pass
+
+            # Energy fallback
+            rms = compute_rms(chunk_data)
+            if rms > ENERGY_THRESHOLD:
+                is_speech = True
+
+            # ── State machine ─────────────────────────────────────────
+            if is_speech:
+                speech_frames += 1
+                silence_frames = 0
+                speech_buffer += chunk_data
+                is_speaking = True
+            else:
+                if is_speaking:
+                    silence_frames += 1
+                    if silence_frames >= min_silence:
+                        # End of utterance!
+                        if speech_frames >= min_speech:
+                            log(f"Speech end detected — {len(speech_buffer)//64} frames, RMS={rms:.0f}")
+                            on_wake(speech_buffer)
+                        # Reset
+                        speech_buffer = b""
+                        speech_frames = 0
+                        silence_frames = 0
+                        is_speaking = False
+                else:
+                    silence_frames = 0
+                    speech_frames = 0
+
+            # Trim buffer to 30s max
+            max_bytes = SAMPLE_RATE * 30 * 2
+            if len(speech_buffer) > max_bytes:
+                speech_buffer = speech_buffer[-max_bytes:]
+
+            # Detect if file size changed (mic was actually recording)
+            cur_size = chunk_file.stat().st_size if chunk_file.exists() else 0
+            last_size = cur_size
+
+    def start(self):
+        self.running = True
+
+    def stop(self):
+        self.running = False
+
+
+# ── Main Jarvis TUI ────────────────────────────────────────────────
+class JarvisTUI:
+    def __init__(self):
+        self.state = "idle"
+        self.vad = None
+        self.running = False
+
+    def on_wake(self, audio_data: bytes):
+        """Called when VAD detects end of speech utterance."""
+        log(f"Wake! Audio buffer: {len(audio_data)//64} frames")
+        self.state = "listening"
+        render("listening", "Listening...")
+
+        # Save for debug
+        save_wav(Path("/data/data/com.termux/files/home/jarvis-voice/wake_audio.wav"), audio_data)
+
+        # Use termux-speech-to-text to transcribe
+        text = listen()
+
+        if text:
+            log(f"You: {text}")
+            self.state = "thinking"
+            render("thinking", "Thinking...")
+
+            response = send_message(SESSION_KEY, text)
+            if not response:
+                response = get_response(text)
+
+            log(f"Jarvis: {response}")
+            self.state = "speaking"
+            render("speaking", "Speaking...")
+            speak(response)
+            self.state = "done"
+            time.sleep(1.5)
+        else:
+            log("(no speech detected)")
+
+        self.state = "idle"
+
+    def run(self):
+        print_banner()
+
+        # Verify termux-api
+        try:
+            subprocess.run(["termux-tts-engines"], capture_output=True, timeout=5)
+        except FileNotFoundError:
+            print("  ❌ termux-api not found! Run: pkg install termux-api")
+            sys.exit(1)
+
+        log(f"Gateway: {GATEWAY_URL}")
+        log(f"Session: {SESSION_KEY}")
+        log(f"VAD: {'WebRTC VAD ✓' if HAS_VAD else 'Energy-only (no webrtcvad)'}")
+        log("Starting VAD loop... (Ctrl+C to stop)")
+        print()
+
+        self.running = True
+        self.vad = VADLoop()
+
+        vad_thread = threading.Thread(target=self.vad.vad_loop, args=(self.on_wake,), daemon=True)
+        self.vad.start()
+        vad_thread.start()
+
+        try:
+            while self.running:
+                if self.state == "idle":
+                    render("idle", "Listening for speech...")
+                elif self.state == "listening":
+                    render("listening", "Listening...")
+                elif self.state == "thinking":
+                    render("thinking", "Thinking...")
+                elif self.state == "speaking":
+                    render("speaking", "Speaking...")
+                elif self.state == "done":
+                    render("done", "Ready")
+                time.sleep(0.25)
+        except KeyboardInterrupt:
+            print("\n\n  👋 Shutting down...")
+            self.vad.stop()
+            self.running = False
 
 
 if __name__ == "__main__":
-    main()
+    JarvisTUI().run()
