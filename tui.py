@@ -271,51 +271,62 @@ def wait_for_tts(text: str):
 
 # ── STT ─────────────────────────────────────────────────────────────
 
-# Whisper model — loaded once, reused for every transcription
-_whisper_model = None
+# whisper-cli model — search common Termux locations
+_WHISPER_MODEL_SEARCH = [
+    "/data/data/com.termux/files/home/whisper.cpp/models/ggml-medium.en.bin",
+    os.path.expanduser("~/whisper.cpp/models/ggml-medium.en.bin"),
+    os.path.expanduser("~/models/ggml-base.en.bin"),
+    os.path.expanduser("~/models/ggml-small.en.bin"),
+    os.path.expanduser("~/models/ggml-tiny.en.bin"),
+    os.path.expanduser("~/models/ggml-base.bin"),
+    os.path.expanduser("~/models/ggml-tiny.bin"),
+    "/data/data/com.termux/files/home/models/ggml-base.en.bin",
+    "/data/data/com.termux/files/home/models/ggml-tiny.en.bin",
+    os.environ.get("WHISPER_MODEL", ""),
+]
 
-def _get_whisper_model():
-    global _whisper_model
-    if _whisper_model is not None:
-        return _whisper_model
-    try:
-        from faster_whisper import WhisperModel
-        SCREEN.update(status="Loading Whisper model...")
-        # tiny — fast on CPU, good enough for short commands
-        _whisper_model = WhisperModel("tiny", device="cpu", compute_type="int8")
-        log("Whisper tiny model loaded")
-        return _whisper_model
-    except ImportError:
-        log("faster-whisper not installed — pip install faster-whisper")
-        return None
-    except Exception as e:
-        log(f"Whisper load error: {e}")
-        return None
+def _find_whisper_model() -> str:
+    for p in _WHISPER_MODEL_SEARCH:
+        if p and Path(p).exists():
+            return p
+    return ""
 
 def _transcribe_wav(wav_path: str) -> str:
-    """Transcribe a WAV file with faster-whisper."""
-    model = _get_whisper_model()
-    if model is None:
+    """Transcribe a WAV file using whisper-cli."""
+    model = _find_whisper_model()
+    if not model:
+        log("No whisper model found — set WHISPER_MODEL env var or download to ~/models/")
+        SCREEN.update(status="⚠ No whisper model — see README")
         return _termux_stt_fallback()
+
     try:
-        segments, _ = model.transcribe(
-            wav_path,
-            language="en",
-            beam_size=3,
-            vad_filter=True,           # skip silence segments
-            vad_parameters={"min_silence_duration_ms": 500},
+        result = subprocess.run(
+            [
+                "whisper-cli",
+                "-m", model,
+                "-f", wav_path,
+                "-l", "en",
+                "--no-prints",          # suppress progress output
+                "--no-timestamps",      # clean text output only
+            ],
+            capture_output=True, text=True, timeout=30,
         )
-        text = " ".join(seg.text.strip() for seg in segments).strip()
-        # Strip hallucinated filler Whisper produces on silence
-        if text.lower() in ("", "you", "thank you", "thanks", ".", "...", "bye"):
+        # whisper-cli prints transcript to stdout, one line per segment
+        lines = [l.strip() for l in result.stdout.splitlines() if l.strip()]
+        text = " ".join(lines).strip()
+        # Filter Whisper hallucinations on silence
+        if text.lower() in ("", "you", "thank you.", "thanks.", ".", "...", "[blank_audio]"):
             return ""
         return text
+    except subprocess.TimeoutExpired:
+        log("whisper-cli timed out")
+        return ""
     except Exception as e:
-        log(f"Whisper transcribe error: {e}")
+        log(f"whisper-cli error: {e}")
         return ""
 
 def _termux_stt_fallback() -> str:
-    """Fallback to termux-speech-to-text if Whisper is unavailable."""
+    """Last-resort fallback to termux-speech-to-text."""
     try:
         result = subprocess.run(
             ["termux-speech-to-text"],
@@ -791,9 +802,6 @@ class JarvisTUI:
             sys.exit(1)
 
         log(f"Gateway: {GATEWAY_URL}  Session: {SESSION_KEY}")
-
-        # Warm up Whisper model in background so it's ready for the first question
-        threading.Thread(target=_get_whisper_model, daemon=True).start()
 
         self.running = True
         self.vad = VADLoop()
