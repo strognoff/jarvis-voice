@@ -715,7 +715,7 @@ class VADLoop:
         is_speaking = False
         threshold = ENERGY_THRESHOLD  # local alias, avoids late binding issues in loops
 
-        CHUNK_DURATION = 1.0  # seconds per recording slice
+        CHUNK_DURATION = 2.0  # seconds per recording slice — longer = more stable flush
 
         while self.running:
             # ── S1: Remove old file ─────────────────────────────────
@@ -756,18 +756,13 @@ class VADLoop:
                     log(f"[vad] record error: {e}")
                     continue
 
-                if not self._wait_for_recording(wav_file):
-                    SCREEN.update(status="⚠ mic: recording not flushed yet")
-                    continue
+                self._wait_for_recording(wav_file)
+                # Proceed even if not perfectly stable — partial audio is
+                # better than skipping the chunk. Hard-skip only if no file.
 
             # ── S4: Check WAV was created ──────────────────────
-            if not wav_file.exists():
-                SCREEN.update(status="⚠ mic: no file — check permission")
-                continue
-
-            file_size = wav_file.stat().st_size
-            if file_size < 2000:
-                SCREEN.update(status=f"⚠ mic: file too small ({file_size}B)")
+            if not wav_file.exists() or wav_file.stat().st_size < 512:
+                SCREEN.update(status="⚠ mic: no file — check mic permission")
                 continue
 
             frames = self._read_pcm_frames(wav_file)
