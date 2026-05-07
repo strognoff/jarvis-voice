@@ -8,7 +8,7 @@
 DURATION=${1:-5}
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 WAV="$SCRIPT_DIR/jarvis_stt_test.wav"
-MODEL=/data/data/com.termux/files/home/whisper.cpp/models/ggml-medium.en.bin
+MODEL=/data/data/com.termux/files/home/whisper.cpp/models/ggml-base.en.bin
 
 echo ""
 echo "  ┌─────────────────────────────────┐"

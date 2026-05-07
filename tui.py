@@ -3,8 +3,9 @@
 tui.py — Jarvis Voice TUI for OpenClaw
 
 Always-on voice assistant:
-- Loops termux-speech-to-text listening for the wake word
+- Uses VAD (termux-microphone-record) for wake detection
 - On wake: speaks "Yes?", listens for question, answers, loops until silence
+- Transcribes speech with whisper-cli (local, no API key needed)
 - Sends to OpenClaw sub-session → speaks back via termux-tts-speak
 - Animated TUI display
 
@@ -273,13 +274,13 @@ def wait_for_tts(text: str):
 
 # whisper-cli model — search common Termux locations
 _WHISPER_MODEL_SEARCH = [
+    "/data/data/com.termux/files/home/whisper.cpp/models/ggml-base.en.bin",
+    os.path.expanduser("~/whisper.cpp/models/ggml-base.en.bin"),
     "/data/data/com.termux/files/home/whisper.cpp/models/ggml-medium.en.bin",
     os.path.expanduser("~/whisper.cpp/models/ggml-medium.en.bin"),
     os.path.expanduser("~/models/ggml-base.en.bin"),
     os.path.expanduser("~/models/ggml-small.en.bin"),
     os.path.expanduser("~/models/ggml-tiny.en.bin"),
-    os.path.expanduser("~/models/ggml-base.bin"),
-    os.path.expanduser("~/models/ggml-tiny.bin"),
     "/data/data/com.termux/files/home/models/ggml-base.en.bin",
     "/data/data/com.termux/files/home/models/ggml-tiny.en.bin",
     os.environ.get("WHISPER_MODEL", ""),
@@ -337,15 +338,22 @@ def _termux_stt_fallback() -> str:
         return ""
 
 def _record_wav(wav_path: str, duration: float) -> bool:
-    """Record audio for `duration` seconds. Returns True if file has content."""
-    if Path(wav_path).exists():
+    """Record audio for `duration` seconds and convert to 16kHz mono PCM.
+
+    termux-microphone-record produces a WAV with a varying codec/sample-rate
+    depending on the device. whisper-cli requires 16kHz mono 16-bit PCM.
+    We record to a raw file then convert in-place with ffmpeg.
+    Returns True if the final file has usable content.
+    """
+    raw_path = wav_path + ".raw.wav"
+    for p in (wav_path, raw_path):
         try:
-            Path(wav_path).unlink()
+            Path(p).unlink(missing_ok=True)
         except Exception:
             pass
     try:
         proc = subprocess.Popen(
-            ["termux-microphone-record", "-f", wav_path],
+            ["termux-microphone-record", "-f", raw_path],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
@@ -362,8 +370,23 @@ def _record_wav(wav_path: str, duration: float) -> bool:
     except Exception as e:
         log(f"record error: {e}")
         return False
-    p = Path(wav_path)
-    return p.exists() and p.stat().st_size > 512
+
+    if not Path(raw_path).exists() or Path(raw_path).stat().st_size < 512:
+        return False
+
+    # Convert to 16kHz mono 16-bit PCM — required by whisper-cli
+    try:
+        r = subprocess.run(
+            ["ffmpeg", "-y", "-i", raw_path,
+             "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", wav_path],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=15,
+        )
+        Path(raw_path).unlink(missing_ok=True)
+        return r.returncode == 0 and Path(wav_path).stat().st_size > 512
+    except Exception as e:
+        log(f"ffmpeg convert error: {e}")
+        return False
 
 _INCOMPLETE_ENDINGS = {
     "a", "an", "the",
@@ -791,17 +814,24 @@ class JarvisTUI:
             SCREEN.update(state="idle", status=f'Say "{WAKE_WORD}" to wake me')
 
     def run(self):
-        missing = [cmd for cmd in ("termux-tts-speak", "termux-speech-to-text",
+        missing = [cmd for cmd in ("termux-tts-speak", "whisper-cli",
                                    "termux-microphone-record")
                    if shutil.which(cmd) is None]
         if missing:
             sys.stdout.write("\033[?25h")
             sys.stdout.flush()
-            print("❌  termux-api not found! Run: pkg install termux-api")
-            print(f"    Missing: {', '.join(missing)}")
+            print("❌  Missing required commands:")
+            for cmd in missing:
+                print(f"    • {cmd}")
+            print("    Run: pkg install termux-api whisper.cpp")
             sys.exit(1)
 
         log(f"Gateway: {GATEWAY_URL}  Session: {SESSION_KEY}")
+        model = _find_whisper_model()
+        if model:
+            log(f"Whisper model: {Path(model).name}")
+        else:
+            log("⚠ No whisper model found — set WHISPER_MODEL=/path/to/ggml-*.bin")
 
         self.running = True
         self.vad = VADLoop()
@@ -854,54 +884,63 @@ def wait_for_termux_recording(path: Path, timeout_s: float = 5.0):
         time.sleep(0.15)
     return path.exists() and path.stat().st_size > 0
 
-def test_mic(duration=3.0, out_path=None):
-    import tempfile
+def test_mic(duration=5.0, out_path=None):
+    """Full pipeline test: record → ffmpeg convert → whisper-cli transcribe."""
+    import tempfile, textwrap
     if out_path is None:
         out_path = str(Path(tempfile.gettempdir()) / "jarvis_mic_test.wav")
-    wav_file = Path(out_path)
-    if wav_file.exists():
-        try:
-            wav_file.unlink()
-        except Exception:
-            pass
 
-    print(f"🎤 Recording {duration}s... (speak clearly)")
-    with _recording_lock:
-        proc = subprocess.Popen(
-            ['termux-microphone-record', '-f', str(wav_file)],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            start_new_session=True
-        )
-        time.sleep(duration)
-        subprocess.run(
-            ['termux-microphone-record', '-q'],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            timeout=3
-        )
-        try:
-            proc.wait(timeout=3)
-        except subprocess.TimeoutExpired:
-            proc.terminate()
-        wait_for_termux_recording(wav_file, duration + 2.0)
+    model = _find_whisper_model()
 
-    if not wav_file.exists():
-        print(f"❌ FAIL — file not created: {wav_file}")
+    print()
+    print("  ┌─────────────────────────────────────┐")
+    print("  │  Jarvis STT Pipeline Test           │")
+    print("  └─────────────────────────────────────┘")
+    print(f"  Model : {Path(model).name if model else '⚠ not found'}")
+    print(f"  Duration: {duration}s")
+    print()
+    print(f"  🎤  Recording {duration}s — speak now...")
+    print()
+
+    ok = _record_wav(out_path, duration)
+    if not ok:
+        print("  ❌  Recording failed — check Termux microphone permission")
+        print("      Settings → Apps → Termux → Permissions → Microphone → Allow")
         return False
-    size = wav_file.stat().st_size
-    if size < 2000:
-        print(f"❌ FAIL — file too small ({size} bytes)")
-        return False
-    print(f"✅ Mic working! File: {wav_file} ({size} bytes)")
 
-    play_result = subprocess.run(
-        ['ffplay', '-loglevel', 'quiet', '-nodisp', '-autoexit', str(wav_file)],
-        capture_output=True, timeout=int(duration + 5), env=MEDIA_ENV
-    )
-    if play_result.returncode != 0:
-        print(f"⚠️  Playback failed — try: ffplay {wav_file}")
+    size = Path(out_path).stat().st_size
+    print(f"  ✓   Recorded and converted  ({size} bytes, 16kHz PCM)")
+
+    if not model:
+        print("  ⚠️   No whisper model — recording works but STT is not configured")
+        print("      Set WHISPER_MODEL=/path/to/ggml-base.en.bin")
+        return False
+
+    print(f"  🧠  Transcribing with {Path(model).name}...")
+    print()
+    text = _transcribe_wav(out_path)
+
+    w = 37
+    print(f"  ┌{'─' * w}┐")
+    if text:
+        for line in textwrap.wrap(text, w - 2):
+            print(f"  │  {line:<{w - 2}}  │")
     else:
-        print("   ✅ Playback complete")
-    return True
+        print(f"  │  {'(nothing heard)':<{w - 2}}  │")
+    print(f"  └{'─' * w}┘")
+    print()
+
+    try:
+        Path(out_path).unlink()
+    except Exception:
+        pass
+
+    if text:
+        print("  ✅  Full pipeline working!\n")
+        return True
+    else:
+        print("  ⚠️   Nothing transcribed — try speaking louder/closer\n")
+        return False
 
 def test_mic_vad():
     import tempfile, webrtcvad, wave, struct, os, subprocess
@@ -1053,8 +1092,8 @@ if __name__ == "__main__":
     if len(sys.argv) > 1:
         if sys.argv[1] in ("--test-mic", "--mic-test", "-t"):
             import argparse
-            parser = argparse.ArgumentParser(description=f"Jarvis Voice TUI v{__version__} — mic test")
-            parser.add_argument("-d", "--duration", type=float, default=3.0)
+            parser = argparse.ArgumentParser(description=f"Jarvis Voice TUI v{__version__} — mic + whisper-cli transcription test")
+            parser.add_argument("-d", "--duration", type=float, default=5.0)
             parser.add_argument("-f", "--file", default=None)
             args, _ = parser.parse_known_args()
             ok = test_mic(duration=args.duration, out_path=args.file)
