@@ -323,8 +323,41 @@ def _find_whisper_model() -> str:
             return p
     return ""
 
+# Whisper commonly hallucinates these on silence or background noise
+_WHISPER_HALLUCINATIONS = {
+    "", ".", "..", "...", "…",
+    "you", "you.", "you!", "you?",
+    "thank you", "thank you.", "thank you!",
+    "thanks", "thanks.", "thanks!",
+    "bye", "bye.", "goodbye", "goodbye.",
+    "okay", "okay.", "ok", "ok.",
+    "um", "uh", "hmm", "hm",
+    "[blank_audio]", "[silence]", "[noise]", "[music]", "(silence)",
+    "subtitles by", "subtitles:", "translated by",
+}
+
+def _wav_rms(wav_path: str) -> float:
+    """Return the RMS energy of a 16kHz PCM WAV file."""
+    try:
+        import wave as _wave
+        with _wave.open(wav_path, "rb") as wf:
+            raw = wf.readframes(wf.getnframes())
+        return compute_rms(raw)
+    except Exception:
+        return 0.0
+
 def _transcribe_wav(wav_path: str) -> str:
-    """Transcribe a WAV file using whisper-cli."""
+    """Transcribe a WAV file using whisper-cli.
+
+    Checks RMS energy first — if the recording is silent, returns ""
+    immediately without running Whisper (saves ~8s and prevents false triggers).
+    """
+    # Energy gate — skip Whisper entirely on silent recordings
+    rms = _wav_rms(wav_path)
+    if rms < ENERGY_THRESHOLD:
+        log(f"Recording silent (RMS={rms:.0f} < {ENERGY_THRESHOLD}) — skipping Whisper")
+        return ""
+
     model = _find_whisper_model()
     if not model:
         log("No whisper model found — set WHISPER_MODEL env var or download to ~/models/")
@@ -338,16 +371,17 @@ def _transcribe_wav(wav_path: str) -> str:
                 "-m", model,
                 "-f", wav_path,
                 "-l", "en",
-                "--no-prints",          # suppress progress output
-                "--no-timestamps",      # clean text output only
+                "--no-prints",
+                "--no-timestamps",
             ],
             capture_output=True, text=True, timeout=30,
         )
-        # whisper-cli prints transcript to stdout, one line per segment
         lines = [l.strip() for l in result.stdout.splitlines() if l.strip()]
         text = " ".join(lines).strip()
-        # Filter Whisper hallucinations on silence
-        if text.lower() in ("", "you", "thank you.", "thanks.", ".", "...", "[blank_audio]"):
+        # Filter hallucinations
+        if text.lower().rstrip(".,!? ") in _WHISPER_HALLUCINATIONS or \
+           text.lower().strip() in _WHISPER_HALLUCINATIONS:
+            log(f"Whisper hallucination filtered: '{text}'")
             return ""
         return text
     except subprocess.TimeoutExpired:
