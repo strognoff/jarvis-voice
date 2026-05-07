@@ -1,0 +1,30 @@
+
+============================================================
+2026-05-07 20:05:51.465 [INFO ] SESSION START  pid=80118  v1.7.0
+============================================================
+2026-05-07 20:05:51.471 [INFO ]   python = 3.14.3
+2026-05-07 20:05:51.474 [INFO ]   platform = Darwin
+2026-05-07 20:05:51.475 [INFO ]   machine = arm64
+2026-05-07 20:05:51.476 [INFO ]   HAS_VAD = False
+2026-05-07 20:05:51.478 [INFO ]   GATEWAY_URL = http://localhost:18789
+2026-05-07 20:05:51.479 [INFO ]   SESSION_KEY = agent:main:subagent:jarvis-tui
+2026-05-07 20:05:51.481 [INFO ]   REQUIRE_WAKE_WORD = False
+2026-05-07 20:05:51.482 [INFO ]   ENERGY_THRESHOLD = 800
+2026-05-07 20:05:51.484 [INFO ]   RECORD_DURATION = 8.0
+2026-05-07 20:05:51.485 [INFO ] Normal info message
+2026-05-07 20:05:51.487 [WARN ] Something looks off
+2026-05-07 20:05:51.488 [ERROR] Something went wrong
+2026-05-07 20:05:51.490 [ERROR] test context: ValueError: test exception for logging
+2026-05-07 20:05:51.492 [ERROR] --- traceback ---
+2026-05-07 20:05:51.492 [ERROR] Traceback (most recent call last):
+2026-05-07 20:05:51.492 [ERROR]   File "<string>", line 13, in <module>
+2026-05-07 20:05:51.492 [ERROR]     raise ValueError('test exception for logging')
+2026-05-07 20:05:51.492 [ERROR] ValueError: test exception for logging
+2026-05-07 20:05:51.492 [ERROR] --- end traceback ---
+2026-05-07 20:05:51.493 [INFO ] --- thread dump (1 threads) ---
+2026-05-07 20:05:51.493 [INFO ]   Thread 'MainThread' daemon=False alive=True
+2026-05-07 20:05:51.493 [INFO ] --- end thread dump ---
+
+============================================================
+2026-05-07 20:05:51.495 [INFO ] SESSION END (test)  pid=80118  v1.7.0
+============================================================

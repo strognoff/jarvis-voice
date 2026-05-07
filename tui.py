@@ -278,21 +278,115 @@ _FACE_FRAMES["__default__"] = _FACE_FRAMES["idle"]
 _LOG_BUF: list[str] = []
 _LOG_MAX = 50
 
-def log(msg: str):
+# ── Structured file logger ────────────────────────────────────────────
+#
+# Writes to jarvis.log in the app directory.
+# Format:  2026-05-07 14:23:01.123 [LEVEL] message
+# Levels:  INFO  WARN  ERROR
+#
+# jarvis.log is never truncated on startup — each run appends a
+# SESSION START / SESSION END banner so you can tell runs apart.
+# Keep the last 50 messages in _LOG_BUF for the TUI display.
+
+LOG_FILE = APP_DIR / "jarvis.log"
+_log_lock = threading.Lock()
+
+def _ts() -> str:
+    return time.strftime("%Y-%m-%d %H:%M:%S") + f".{int(time.time() * 1000) % 1000:03d}"
+
+def _write_log_file(level: str, msg: str):
+    """Append one line to jarvis.log. Never raises."""
+    try:
+        with _log_lock:
+            with open(LOG_FILE, "a", encoding="utf-8") as f:
+                f.write(f"{_ts()} [{level:5s}] {msg}\n")
+    except Exception:
+        pass
+
+def log(msg: str, level: str = "INFO"):
+    """Log to TUI display buffer and jarvis.log."""
     entry = f"[{time.strftime('%H:%M:%S')}] {msg}"
     _LOG_BUF.append(entry)
     if len(_LOG_BUF) > _LOG_MAX:
         _LOG_BUF.pop(0)
+    _write_log_file(level, msg)
+
+def log_warn(msg: str):
+    log(msg, level="WARN")
+
+def log_error(msg: str):
+    log(msg, level="ERROR")
 
 def log_exception(context: str, exc: BaseException):
+    """Log an exception with full traceback to jarvis.log."""
     trace = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
-    log(f"{context}: {type(exc).__name__}: {exc}")
+    summary = f"{context}: {type(exc).__name__}: {exc}"
+    log(summary, level="ERROR")
     try:
-        with open(APP_DIR / "jarvis_error.log", "a") as f:
-            f.write(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] {context}\n")
-            f.write(trace)
+        with _log_lock:
+            with open(LOG_FILE, "a", encoding="utf-8") as f:
+                f.write(f"{_ts()} [ERROR] --- traceback ---\n")
+                for line in trace.splitlines():
+                    f.write(f"{_ts()} [ERROR] {line}\n")
+                f.write(f"{_ts()} [ERROR] --- end traceback ---\n")
     except Exception:
         pass
+
+def _log_session_banner(kind: str):
+    """Write a visible session START/END separator to jarvis.log."""
+    sep = "=" * 60
+    try:
+        with _log_lock:
+            with open(LOG_FILE, "a", encoding="utf-8") as f:
+                f.write(f"\n{sep}\n")
+                f.write(f"{_ts()} [INFO ] SESSION {kind}  pid={os.getpid()}  v{__version__}\n")
+                f.write(f"{sep}\n")
+    except Exception:
+        pass
+
+def _log_thread_dump():
+    """Dump all live thread names/states to jarvis.log — useful for hang diagnosis."""
+    try:
+        import threading as _th
+        lines = [f"  Thread '{t.name}' daemon={t.daemon} alive={t.is_alive()}"
+                 for t in _th.enumerate()]
+        with _log_lock:
+            with open(LOG_FILE, "a", encoding="utf-8") as f:
+                f.write(f"{_ts()} [INFO ] --- thread dump ({len(lines)} threads) ---\n")
+                for l in lines:
+                    f.write(f"{_ts()} [INFO ] {l}\n")
+                f.write(f"{_ts()} [INFO ] --- end thread dump ---\n")
+    except Exception:
+        pass
+
+def _log_system_info():
+    """Log platform, Python version, key env vars at session start."""
+    import platform
+    info = {
+        "python": platform.python_version(),
+        "platform": platform.system(),
+        "machine": platform.machine(),
+        "HAS_VAD": str(HAS_VAD),
+        "GATEWAY_URL": GATEWAY_URL,
+        "SESSION_KEY": SESSION_KEY,
+        "REQUIRE_WAKE_WORD": str(REQUIRE_WAKE_WORD),
+        "ENERGY_THRESHOLD": str(ENERGY_THRESHOLD),
+        "RECORD_DURATION": str(RECORD_DURATION),
+    }
+    for k, v in info.items():
+        _write_log_file("INFO ", f"  {k} = {v}")
+
+def _watched_thread(name: str, target, *args, daemon: bool = True, **kwargs) -> threading.Thread:
+    """Wrap a thread target so any unhandled exception is logged to jarvis.log."""
+    def _wrapper():
+        log(f"Thread '{name}' started", level="INFO ")
+        try:
+            target(*args, **kwargs)
+            log(f"Thread '{name}' exited normally", level="INFO ")
+        except Exception as exc:
+            log_exception(f"Thread '{name}' crashed", exc)
+    t = threading.Thread(target=_wrapper, name=name, daemon=daemon)
+    return t
 
 def print_banner():
     pass
@@ -829,6 +923,32 @@ def _termux_stt_fallback() -> str:
     except Exception:
         return ""
 
+def _force_kill_proc(proc: subprocess.Popen, context: str):
+    """Escalate: SIGTERM → SIGKILL → killpg. Logs each step to jarvis.log."""
+    try:
+        proc.terminate()
+        proc.wait(timeout=1)
+        return
+    except subprocess.TimeoutExpired:
+        log_warn(f"{context}: SIGTERM ignored, sending SIGKILL")
+    except Exception:
+        pass
+    try:
+        proc.kill()
+        proc.wait(timeout=1)
+        return
+    except subprocess.TimeoutExpired:
+        log_warn(f"{context}: SIGKILL ignored, trying killpg")
+    except Exception:
+        pass
+    try:
+        import signal
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        log_warn(f"{context}: sent SIGKILL to process group")
+    except Exception as e:
+        log_error(f"{context}: could not kill process group: {e}")
+
+
 def _record_wav(wav_path: str, duration: float) -> bool:
     """Record audio for `duration` seconds and convert to 16kHz mono PCM.
 
@@ -836,13 +956,21 @@ def _record_wav(wav_path: str, duration: float) -> bool:
     depending on the device. whisper-cli requires 16kHz mono 16-bit PCM.
     We record to a raw file then convert in-place with ffmpeg.
     Returns True if the final file has usable content.
+
+    The raw.wav file is ALWAYS deleted in the finally block regardless of
+    which failure path is taken — this prevents jarvis_listen.wav.raw.wav
+    from being left behind when the recorder or ffmpeg hangs.
     """
     raw_path = wav_path + ".raw.wav"
+
+    # Clean up any stale files from a previous crashed run
     for p in (wav_path, raw_path):
         try:
             Path(p).unlink(missing_ok=True)
-        except Exception:
-            pass
+        except Exception as e:
+            log_warn(f"_record_wav: could not remove stale {p}: {e}")
+
+    proc = None
     try:
         proc = subprocess.Popen(
             ["termux-microphone-record", "-f", raw_path],
@@ -850,23 +978,40 @@ def _record_wav(wav_path: str, duration: float) -> bool:
             start_new_session=True,
         )
         time.sleep(duration)
-        subprocess.run(
-            ["termux-microphone-record", "-q"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            timeout=3,
-        )
+
+        # Graceful stop via the control command
+        try:
+            subprocess.run(
+                ["termux-microphone-record", "-q"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=3,
+            )
+        except Exception as e:
+            log_warn(f"_record_wav: stop command failed: {e}")
+
+        # Wait for the recorder process to exit; escalate if it doesn't
         try:
             proc.wait(timeout=2)
         except subprocess.TimeoutExpired:
-            proc.terminate()
+            log_warn("_record_wav: recorder did not exit after stop — force killing")
+            _force_kill_proc(proc, "_record_wav recorder")
+            proc = None
+
     except Exception as e:
-        log(f"record error: {e}")
+        log_exception("_record_wav: recorder failed to start", e)
         return False
 
-    if not Path(raw_path).exists() or Path(raw_path).stat().st_size < 512:
+    raw_p = Path(raw_path)
+    if not raw_p.exists():
+        log_warn(f"_record_wav: raw file missing after recording: {raw_path}")
+        return False
+    raw_size = raw_p.stat().st_size
+    if raw_size < 512:
+        log_warn(f"_record_wav: raw file too small ({raw_size}B) — mic may be silent or blocked")
         return False
 
-    # Convert to 16kHz mono 16-bit PCM — required by whisper-cli
+    # Convert to 16kHz mono 16-bit PCM — required by whisper-cli.
+    # raw_path is deleted in the finally block regardless of ffmpeg outcome.
     try:
         r = subprocess.run(
             ["ffmpeg", "-y", "-i", raw_path,
@@ -874,11 +1019,26 @@ def _record_wav(wav_path: str, duration: float) -> bool:
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             timeout=15,
         )
-        Path(raw_path).unlink(missing_ok=True)
-        return r.returncode == 0 and Path(wav_path).stat().st_size > 512
-    except Exception as e:
-        log(f"ffmpeg convert error: {e}")
+        if r.returncode != 0:
+            log_error(f"_record_wav: ffmpeg exited {r.returncode} converting {raw_path}")
+            return False
+        out_size = Path(wav_path).stat().st_size if Path(wav_path).exists() else 0
+        if out_size < 512:
+            log_error(f"_record_wav: converted WAV too small ({out_size}B)")
+            return False
+        return True
+    except subprocess.TimeoutExpired:
+        log_error(f"_record_wav: ffmpeg timed out converting {raw_path} — file may be corrupt/held open")
         return False
+    except Exception as e:
+        log_exception("_record_wav: ffmpeg error", e)
+        return False
+    finally:
+        # ALWAYS remove raw.wav — this is the line that prevents the hang-file
+        try:
+            Path(raw_path).unlink(missing_ok=True)
+        except Exception as e:
+            log_error(f"_record_wav: could not delete raw file {raw_path}: {e}")
 
 
 def _wait_for_silence(max_wait: float = 5.0):
@@ -1113,6 +1273,7 @@ class VADLoop:
 
     def _record_chunk(self, wav_path: str, duration_s: float):
         """Record audio for duration_s seconds, then kill the process."""
+        proc = None
         try:
             proc = subprocess.Popen(
                 ['termux-microphone-record', '-f', wav_path],
@@ -1120,18 +1281,25 @@ class VADLoop:
                 start_new_session=True
             )
             time.sleep(duration_s)
-            # Send stop command, then kill the process
-            subprocess.run(
-                ['termux-microphone-record', '-q'],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                timeout=2
-            )
+            # Graceful stop
+            try:
+                subprocess.run(
+                    ['termux-microphone-record', '-q'],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    timeout=2
+                )
+            except Exception as e:
+                log_warn(f"[vad] stop command failed: {e}")
+            # Wait; escalate if it doesn't exit
             try:
                 proc.wait(timeout=2)
             except subprocess.TimeoutExpired:
-                proc.terminate()
+                log_warn("[vad] recorder stuck — force killing")
+                _force_kill_proc(proc, "vad _record_chunk")
         except Exception as e:
-            log(f"[vad] record error: {e}")
+            log_exception("[vad] _record_chunk failed", e)
+            if proc is not None:
+                _force_kill_proc(proc, "vad _record_chunk (exception path)")
 
     def _read_pcm_frames(self, wav_file: Path):
         """Convert WAV to raw 16kHz PCM frames via ffmpeg."""
@@ -1243,9 +1411,7 @@ class JarvisTUI:
         """Restart VAD in a fresh thread after conversation ends."""
         if self.vad:
             self.vad.start()
-            threading.Thread(
-                target=self.vad.vad_loop, args=(self.on_wake,), daemon=True
-            ).start()
+            _watched_thread("vad-loop-resume", self.vad.vad_loop, self.on_wake).start()
 
     def on_wake(self):
         """Called by VADLoop when speech+silence detected.
@@ -1332,16 +1498,33 @@ class JarvisTUI:
             render("idle", "Speak to wake me up")
 
     def run(self):
+        _log_session_banner("START")
+        _log_system_info()
+
+        # Clean up any stale raw.wav files left by a previous crash
+        import tempfile, glob as _glob
+        stale = _glob.glob(str(Path(tempfile.gettempdir()) / "jarvis_*.raw.wav"))
+        stale += _glob.glob(str(Path(tempfile.gettempdir()) / "jarvis_*.wav"))
+        for f in stale:
+            try:
+                Path(f).unlink(missing_ok=True)
+                log_warn(f"Deleted stale temp file from previous crash: {f}")
+            except Exception as e:
+                log_error(f"Could not delete stale file {f}: {e}")
+
         missing = [cmd for cmd in ("termux-tts-speak", "whisper-cli",
                                    "termux-microphone-record")
                    if shutil.which(cmd) is None]
         if missing:
+            for cmd in missing:
+                log_error(f"Missing required command: {cmd}")
             sys.stdout.write("\033[?25h")
             sys.stdout.flush()
             print("❌  Missing required commands:")
             for cmd in missing:
                 print(f"    • {cmd}")
             print("    Run: pkg install termux-api whisper.cpp")
+            _log_session_banner("END (missing commands)")
             sys.exit(1)
 
         log(f"Gateway: {GATEWAY_URL}  Session: {SESSION_KEY}")
@@ -1349,35 +1532,67 @@ class JarvisTUI:
         if model:
             log(f"Whisper model: {Path(model).name}")
         else:
-            log("⚠ No whisper model found — set WHISPER_MODEL=/path/to/ggml-*.bin")
+            log_warn("No whisper model found — set WHISPER_MODEL=/path/to/ggml-*.bin")
 
         self.running = True
         self.vad = VADLoop()
 
-        # Animation ticker
-        def _ticker():
+        # Animation ticker — wrapped so crashes write to jarvis.log
+        def _ticker_fn():
             while self.running:
-                SCREEN.tick()
+                try:
+                    SCREEN.tick()
+                except Exception as exc:
+                    log_exception("ticker crash", exc)
                 time.sleep(0.25)
-        threading.Thread(target=_ticker, daemon=True).start()
 
-        # Start VAD loop
+        _watched_thread("ticker", _ticker_fn).start()
+
+        # VAD loop — wrapped so crashes write to jarvis.log
         self.vad.start()
-        vad_thread = threading.Thread(
-            target=self.vad.vad_loop, args=(self.on_wake,), daemon=True
-        )
+        vad_thread = _watched_thread("vad-loop", self.vad.vad_loop, self.on_wake)
         vad_thread.start()
 
-        render("idle", "Speak to wake me up")
+        # Watchdog — every 60s: dump threads + detect if VAD died
+        def _watchdog_fn():
+            while self.running:
+                time.sleep(60)
+                if not self.running:
+                    break
+                _log_thread_dump()
+                if not vad_thread.is_alive() and self.running:
+                    log_error("VAD thread died unexpectedly — app may be deaf")
+                    # Attempt restart
+                    try:
+                        self.vad.start()
+                        new_vad = _watched_thread("vad-loop-restart",
+                                                  self.vad.vad_loop, self.on_wake)
+                        new_vad.start()
+                        log("VAD thread restarted")
+                    except Exception as exc:
+                        log_exception("VAD restart failed", exc)
 
+        _watched_thread("watchdog", _watchdog_fn).start()
+
+        render("idle", "Speak to wake me up")
+        log("Ready — waiting for voice activity")
+
+        exit_reason = "normal"
         try:
             while self.running:
                 time.sleep(0.5)
         except KeyboardInterrupt:
-            pass
+            exit_reason = "KeyboardInterrupt"
+            log("Interrupted by user (Ctrl+C)")
+        except Exception as exc:
+            exit_reason = f"{type(exc).__name__}"
+            log_exception("Main loop crashed", exc)
         finally:
+            log(f"Shutting down — reason: {exit_reason}")
             self.vad.stop()
             self.running = False
+            _log_thread_dump()
+            _log_session_banner(f"END ({exit_reason})")
             sys.stdout.write("\033[?25h\n")
             sys.stdout.flush()
 
