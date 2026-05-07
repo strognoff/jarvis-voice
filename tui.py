@@ -32,26 +32,57 @@ from pathlib import Path
 
 APP_DIR = Path(__file__).parent
 
+# ── Config loader ───────────────────────────────────────────────────
+def _load_conf(path: Path) -> dict:
+    """Parse a simple KEY = value config file. Returns a dict of strings."""
+    conf = {}
+    if not path.exists():
+        return conf
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" not in line:
+                continue
+            key, _, val = line.partition("=")
+            conf[key.strip()] = val.strip()
+    return conf
+
+def _cfg(conf: dict, key: str, default: str) -> str:
+    """Resolve a setting: env var > conf file > default."""
+    env_key = f"JARVIS_{key}"
+    return os.environ.get(env_key, conf.get(key, default))
+
+_CONF = _load_conf(APP_DIR / "jarvis.conf")
+
 # ── Config ─────────────────────────────────────────────────────────
-GATEWAY_URL   = os.environ.get("JARVIS_GATEWAY_URL", "http://localhost:18789")
-AUTH_TOKEN    = os.environ.get("JARVIS_AUTH_TOKEN", "")
-SESSION_KEY   = os.environ.get("JARVIS_SESSION",    "agent:main:subagent:jarvis-tui")
-OPENCLAW_SESSION_ID = os.environ.get("JARVIS_OPENCLAW_SESSION_ID", "jarvis-tui")
-OPENCLAW_TIMEOUT = int(os.environ.get("JARVIS_OPENCLAW_TIMEOUT", "90"))
+GATEWAY_URL          = _cfg(_CONF, "GATEWAY_URL",          "http://localhost:18789")
+AUTH_TOKEN           = _cfg(_CONF, "AUTH_TOKEN",           "")
+SESSION_KEY          = _cfg(_CONF, "SESSION_KEY",          "agent:main:subagent:jarvis-tui")
+OPENCLAW_SESSION_ID  = _cfg(_CONF, "OPENCLAW_SESSION_ID",  "jarvis-tui")
+OPENCLAW_TIMEOUT     = int(_cfg(_CONF, "OPENCLAW_TIMEOUT", "90"))
 
-# Audio settings
-SAMPLE_RATE   = 16000
+# Audio / recording
+SAMPLE_RATE       = 16000
 FRAME_DURATION_MS = 30
-ENERGY_THRESHOLD  = 800
-WAKE_WORD = os.environ.get("JARVIS_WAKE_WORD", "hello").strip().lower()
-REQUIRE_WAKE_WORD = os.environ.get("JARVIS_REQUIRE_WAKE_WORD", "0").lower() not in ("0", "false", "no")
-WAKE_WORD_TIMEOUT = float(os.environ.get("JARVIS_WAKE_WORD_TIMEOUT", "5.0"))
-QUESTION_TIMEOUT = float(os.environ.get("JARVIS_QUESTION_TIMEOUT", "45"))
-CONVERSATION_IDLE_TIMEOUT = float(os.environ.get("JARVIS_CONVERSATION_IDLE_TIMEOUT", "15"))
+ENERGY_THRESHOLD  = int(_cfg(_CONF, "ENERGY_THRESHOLD",  "800"))
+RECORD_DURATION   = float(_cfg(_CONF, "RECORD_DURATION", "8.0"))
+MIC_DELAY         = float(_cfg(_CONF, "MIC_DELAY",       "1.0"))
 
-TTS_SETTLE_SECONDS = float(os.environ.get("JARVIS_TTS_SETTLE_SECONDS", "0.8"))
-TTS_WORDS_PER_MINUTE = float(os.environ.get("JARVIS_TTS_WORDS_PER_MINUTE", "155"))
-TTS_MAX_WAIT_SECONDS = float(os.environ.get("JARVIS_TTS_MAX_WAIT_SECONDS", "18"))
+# Wake word
+WAKE_WORD         = _cfg(_CONF, "WAKE_WORD",         "hello").strip().lower()
+REQUIRE_WAKE_WORD = _cfg(_CONF, "REQUIRE_WAKE_WORD", "0").lower() not in ("0", "false", "no")
+WAKE_WORD_TIMEOUT = float(_cfg(_CONF, "WAKE_WORD_TIMEOUT", "5.0"))
+
+# Timeouts
+QUESTION_TIMEOUT          = float(_cfg(_CONF, "QUESTION_TIMEOUT",          "45"))
+CONVERSATION_IDLE_TIMEOUT = float(_cfg(_CONF, "CONVERSATION_IDLE_TIMEOUT", "15"))
+
+# TTS
+TTS_SETTLE_SECONDS   = float(_cfg(_CONF, "TTS_SETTLE_SECONDS",   "0.8"))
+TTS_WORDS_PER_MINUTE = float(_cfg(_CONF, "TTS_WORDS_PER_MINUTE", "155"))
+TTS_MAX_WAIT_SECONDS = float(_cfg(_CONF, "TTS_MAX_WAIT_SECONDS", "18"))
 
 MEDIA_ENV = os.environ.copy()
 MEDIA_ENV.pop("LD_LIBRARY_PATH", None)
@@ -273,6 +304,7 @@ def wait_for_tts(text: str):
 
 # whisper-cli model — search common Termux locations
 _WHISPER_MODEL_SEARCH = [
+    _cfg(_CONF, "WHISPER_MODEL", ""),  # explicit conf/env path takes priority
     "/data/data/com.termux/files/home/whisper.cpp/models/ggml-base.en.bin",
     os.path.expanduser("~/whisper.cpp/models/ggml-base.en.bin"),
     "/data/data/com.termux/files/home/whisper.cpp/models/ggml-medium.en.bin",
@@ -407,11 +439,11 @@ def listen(timeout: float = QUESTION_TIMEOUT) -> str:
     import tempfile
 
     wav = str(Path(tempfile.gettempdir()) / "jarvis_listen.wav")
-    duration = min(timeout, 8.0)
+    duration = min(timeout, RECORD_DURATION)
 
     # Wait for "Yes?" TTS to finish before opening the mic, otherwise the
     # first word captures Jarvis's own voice instead of the user's question.
-    time.sleep(1.0)
+    time.sleep(MIC_DELAY)
 
     # Start countdown animation in background
     stop_countdown = threading.Event()
