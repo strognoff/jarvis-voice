@@ -1123,15 +1123,20 @@ def listen(timeout: float = QUESTION_TIMEOUT) -> str:
     # bleed and reverb regardless of volume or response length.
     _wait_for_silence(max_wait=MIC_DELAY + 4.0)
 
-    # Start countdown animation in background
+    # Start countdown animation in background.
+    # stop_countdown is set in finally — guaranteed even if _record_wav hangs/raises.
     stop_countdown = threading.Event()
     t = threading.Thread(target=_countdown_bar, args=(duration, stop_countdown), daemon=True)
     t.start()
 
-    ok = _record_wav(wav, duration)
-
-    stop_countdown.set()
-    t.join()
+    ok = False
+    try:
+        ok = _record_wav(wav, duration)
+    finally:
+        stop_countdown.set()
+        t.join(timeout=duration + 2.0)   # should be instant; 2s safety margin
+        if t.is_alive():
+            log_warn("listen: countdown bar thread did not exit — abandoning it")
 
     if not ok:
         return ""
@@ -1404,6 +1409,7 @@ class JarvisTUI:
         self.running = False
         self.pending_intent = None
         self.vad = None
+        self._vad_thread = None   # updated by run() and _resume_vad(); watched by watchdog
 
     def _pause_vad(self):
         """Stop VAD and release mic before STT takes over."""
@@ -1430,11 +1436,13 @@ class JarvisTUI:
         The old instance's vad_loop thread exits naturally (self.running=False).
         We create a new VADLoop so the new thread starts with a clean running=True
         and there is no shared state with the old thread that is winding down.
+        self._vad_thread is updated so the watchdog always checks the live thread.
         """
         log("Resuming VAD — creating fresh VADLoop")
         self.vad = VADLoop()
         self.vad.start()
-        _watched_thread("vad-loop-resume", self.vad.vad_loop, self.on_wake).start()
+        self._vad_thread = _watched_thread("vad-loop-resume", self.vad.vad_loop, self.on_wake)
+        self._vad_thread.start()
         log("VAD resumed — listening for wake")
 
     def on_wake(self):
@@ -1571,29 +1579,28 @@ class JarvisTUI:
 
         _watched_thread("ticker", _ticker_fn).start()
 
-        # VAD loop — wrapped so crashes write to jarvis.log
+        # VAD loop — wrapped so crashes write to jarvis.log.
+        # self._vad_thread always points to the current active VAD thread so the
+        # watchdog can check the right one (updated by _resume_vad on each resume).
         self.vad.start()
-        vad_thread = _watched_thread("vad-loop", self.vad.vad_loop, self.on_wake)
-        vad_thread.start()
+        self._vad_thread = _watched_thread("vad-loop", self.vad.vad_loop, self.on_wake)
+        self._vad_thread.start()
 
-        # Watchdog — every 60s: dump threads + detect if VAD died
+        # Watchdog — every 60s: dump threads + detect if VAD died unexpectedly.
+        # Only fires when app state is "idle" — during a conversation VAD is
+        # intentionally paused so self._vad_thread being dead is normal.
         def _watchdog_fn():
             while self.running:
                 time.sleep(60)
                 if not self.running:
                     break
                 _log_thread_dump()
-                if not vad_thread.is_alive() and self.running:
-                    log_error("VAD thread died unexpectedly — app may be deaf")
-                    # Attempt restart
+                if not self._vad_thread.is_alive() and self.state == "idle":
+                    log_error("VAD thread died while idle — attempting restart")
                     try:
-                        self.vad.start()
-                        new_vad = _watched_thread("vad-loop-restart",
-                                                  self.vad.vad_loop, self.on_wake)
-                        new_vad.start()
-                        log("VAD thread restarted")
+                        self._resume_vad()
                     except Exception as exc:
-                        log_exception("VAD restart failed", exc)
+                        log_exception("Watchdog VAD restart failed", exc)
 
         _watched_thread("watchdog", _watchdog_fn).start()
 
