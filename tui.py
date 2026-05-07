@@ -498,35 +498,26 @@ def save_wav(path, audio_data, sample_rate=SAMPLE_RATE):
         wf.setframerate(sample_rate)
         wf.writeframes(audio_data)
 
-def wait_for_termux_recording(path: Path, timeout_s: float):
-    """Wait for Termux:API's async microphone recorder to finish writing a file."""
+def wait_for_termux_recording(path: Path, timeout_s: float = 5.0):
+    """Wait for Termux:API to finish writing the recorded WAV file.
+
+    Termux:API writes files asynchronously — the recording process may have
+    exited but the file is still being flushed.  We poll the file size and
+    return as soon as it is non-zero and stable (same size twice in a row).
+    Avoids calling `termux-microphone-record -i` which is unreliable across
+    Termux versions and adds latency.
+    """
     deadline = time.time() + timeout_s
     last_size = -1
-    stable_checks = 0
 
     while time.time() < deadline:
-        is_recording = False
-        try:
-            info = subprocess.run(
-                ['termux-microphone-record', '-i'],
-                capture_output=True, text=True, timeout=1
-            )
-            is_recording = '"isRecording": true' in info.stdout
-        except Exception:
-            pass
-
         size = path.stat().st_size if path.exists() else 0
-        if size > 0 and not is_recording:
-            if size == last_size:
-                stable_checks += 1
-            else:
-                stable_checks = 0
-            if stable_checks >= 1:
-                return True
-
+        if size > 0 and size == last_size:
+            return True          # file exists and stopped growing — done
         last_size = size
-        time.sleep(0.1)
+        time.sleep(0.15)
 
+    # Final check — accept whatever is there
     return path.exists() and path.stat().st_size > 0
 
 # ── OpenClaw Gateway ────────────────────────────────────────────────
