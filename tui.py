@@ -1050,7 +1050,7 @@ def _wait_for_silence(max_wait: float = 5.0):
     """
     import tempfile
     probe = str(Path(tempfile.gettempdir()) / "jarvis_probe.wav")
-    PROBE_DURATION = 0.5
+    PROBE_DURATION = 1.0   # 0.5s was too short — mic needs ~0.8s to open on Termux
     TAIL_BUFFER    = 0.3   # extra quiet time after silence detected
     deadline = time.time() + max_wait
 
@@ -1396,22 +1396,34 @@ class JarvisTUI:
     def _pause_vad(self):
         """Stop VAD and release mic before STT takes over."""
         if self.vad:
+            log("Pausing VAD — releasing mic for STT")
             self.vad.stop()
             # Stop any in-flight recording and give it time to release the mic.
             # VAD records 1s chunks — worst case we need to wait for the current
             # chunk to finish + ffmpeg convert + mic release before we can record.
-            subprocess.run(
-                ['termux-microphone-record', '-q'],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                timeout=3
-            )
+            try:
+                subprocess.run(
+                    ['termux-microphone-record', '-q'],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    timeout=3
+                )
+            except Exception as e:
+                log_warn(f"_pause_vad: stop command failed: {e}")
             time.sleep(1.5)
+            log("VAD paused — mic released")
 
     def _resume_vad(self):
-        """Restart VAD in a fresh thread after conversation ends."""
-        if self.vad:
-            self.vad.start()
-            _watched_thread("vad-loop-resume", self.vad.vad_loop, self.on_wake).start()
+        """Restart VAD using a FRESH VADLoop instance to avoid running-flag races.
+
+        The old instance's vad_loop thread exits naturally (self.running=False).
+        We create a new VADLoop so the new thread starts with a clean running=True
+        and there is no shared state with the old thread that is winding down.
+        """
+        log("Resuming VAD — creating fresh VADLoop")
+        self.vad = VADLoop()
+        self.vad.start()
+        _watched_thread("vad-loop-resume", self.vad.vad_loop, self.on_wake).start()
+        log("VAD resumed — listening for wake")
 
     def on_wake(self):
         """Called by VADLoop when speech+silence detected.
@@ -1501,10 +1513,9 @@ class JarvisTUI:
         _log_session_banner("START")
         _log_system_info()
 
-        # Clean up any stale raw.wav files left by a previous crash
+        # Clean up any stale temp files left by a previous crash
         import tempfile, glob as _glob
-        stale = _glob.glob(str(Path(tempfile.gettempdir()) / "jarvis_*.raw.wav"))
-        stale += _glob.glob(str(Path(tempfile.gettempdir()) / "jarvis_*.wav"))
+        stale = set(_glob.glob(str(Path(tempfile.gettempdir()) / "jarvis_*.wav")))
         for f in stale:
             try:
                 Path(f).unlink(missing_ok=True)
