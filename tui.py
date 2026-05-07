@@ -388,24 +388,41 @@ def _record_wav(wav_path: str, duration: float) -> bool:
         return False
 
 
-def listen(timeout: float = QUESTION_TIMEOUT) -> str:
-    """Record a single continuous audio clip then transcribe with whisper-cli.
+def _countdown_bar(duration: float, stop_event: threading.Event):
+    """Animate a countdown bar in the status line while recording.
+    Runs in a background thread — stops when stop_event is set."""
+    bar_width = 12  # characters wide
+    start = time.time()
+    while not stop_event.is_set():
+        elapsed = time.time() - start
+        remaining = max(0.0, duration - elapsed)
+        filled = int(bar_width * remaining / duration)
+        bar = "█" * filled + "░" * (bar_width - filled)
+        SCREEN.update(status=f"🎙 [{bar}] {remaining:.0f}s")
+        time.sleep(0.25)
 
-    Records for `duration` seconds in one uninterrupted recording — identical
-    to what --test-mic does. Fragmented chunk-based recording loses audio in
-    the gaps between process restarts. Whisper's built-in VAD handles silence.
-    """
+
+def listen(timeout: float = QUESTION_TIMEOUT) -> str:
+    """Record a single continuous audio clip then transcribe with whisper-cli."""
     import tempfile
 
     wav = str(Path(tempfile.gettempdir()) / "jarvis_listen.wav")
-
-    # Cap at 8s for a natural utterance — enough for any question.
-    # For conversation follow-ups timeout=CONVERSATION_IDLE_TIMEOUT (15s),
-    # but we still cap at 8s since nobody speaks for longer than that.
     duration = min(timeout, 8.0)
 
-    SCREEN.update(status=f"Listening... ({duration:.0f}s)")
+    # Wait for "Yes?" TTS to finish before opening the mic, otherwise the
+    # first word captures Jarvis's own voice instead of the user's question.
+    time.sleep(1.0)
+
+    # Start countdown animation in background
+    stop_countdown = threading.Event()
+    t = threading.Thread(target=_countdown_bar, args=(duration, stop_countdown), daemon=True)
+    t.start()
+
     ok = _record_wav(wav, duration)
+
+    stop_countdown.set()
+    t.join()
+
     if not ok:
         return ""
 
@@ -746,7 +763,6 @@ class JarvisTUI:
                     ),
                     daemon=True,
                 ).start()
-                time.sleep(0.3)
                 question = listen(timeout=QUESTION_TIMEOUT)
                 SCREEN.update(question=question or "")
 
