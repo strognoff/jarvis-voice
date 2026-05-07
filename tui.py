@@ -44,8 +44,9 @@ MEMORY_DIR    = "/data/data/com.termux/files/home/.openclaw/memory"
 SAMPLE_RATE   = 16000
 FRAME_DURATION_MS = 30  # 30ms WebRTC standard
 ENERGY_THRESHOLD  = 800
-WAKE_WORD = os.environ.get("JARVIS_WAKE_WORD", "hey jarvis").strip().lower()
-REQUIRE_WAKE_WORD = os.environ.get("JARVIS_REQUIRE_WAKE_WORD", "0").lower() not in ("0", "false", "no")
+WAKE_WORD = os.environ.get("JARVIS_WAKE_WORD", "jarvis").strip().lower()
+REQUIRE_WAKE_WORD = os.environ.get("JARVIS_REQUIRE_WAKE_WORD", "1").lower() not in ("0", "false", "no")
+WAKE_WORD_TIMEOUT = float(os.environ.get("JARVIS_WAKE_WORD_TIMEOUT", "5.0"))  # short STT window to catch wake word
 QUESTION_TIMEOUT = float(os.environ.get("JARVIS_QUESTION_TIMEOUT", "45"))
 CONVERSATION_IDLE_TIMEOUT = float(os.environ.get("JARVIS_CONVERSATION_IDLE_TIMEOUT", "15"))
 STT_CONTINUATION_TIMEOUT = float(os.environ.get("JARVIS_STT_CONTINUATION_TIMEOUT", "8.0"))
@@ -801,7 +802,7 @@ class VADLoop:
                     silence_frames = 0
                     if not is_speaking and speech_frames >= min_speech:
                         is_speaking = True
-                        render("wake", "Voice heard. Say the wake phrase...")
+                        render("wake", f'Heard something — checking for "{WAKE_WORD}"...')
                 elif is_speaking:
                     silence_frames += 1
                     if silence_frames >= min_silence:
@@ -889,16 +890,17 @@ class JarvisTUI:
         try:
             question = ""
 
-            # Step 1: optionally verify wake word
+            # Step 1: verify wake word with a SHORT timeout — if VAD fires on
+            # background noise and the user didn't say "Jarvis", we bail fast
+            # (WAKE_WORD_TIMEOUT default 5s) rather than waiting 45s.
             if REQUIRE_WAKE_WORD:
                 render("listening", f'Say "{WAKE_WORD}"...')
-                text = listen(timeout=QUESTION_TIMEOUT)
+                text = listen(timeout=WAKE_WORD_TIMEOUT)
                 SCREEN.update(question=text or "")
                 is_wake, question = extract_question(text)
                 if not is_wake:
-                    if text:
-                        log(f"Ignored speech without wake phrase: {text}")
-                    return  # finally block restores state
+                    log(f"No wake word in: '{text}' — back to idle")
+                    return  # finally block restores state + resumes VAD
 
             # Step 2: if no question yet, speak "Yes?" then listen AFTER TTS finishes
             if not question:
