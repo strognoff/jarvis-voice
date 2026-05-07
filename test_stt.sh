@@ -69,18 +69,35 @@ if [ "$SIZE" -lt 512 ]; then
 fi
 
 echo "  ✓  Recorded ${SIZE} bytes"
+
+# Show what format the mic produced
+echo "  ℹ️   Raw format:"
+ffprobe -v quiet -show_streams -select_streams a "$WAV" 2>&1 \
+    | grep -E "codec_name|sample_rate|channels|bit_rate" \
+    | sed 's/^/       /'
+echo ""
+
+# ── Convert to 16kHz mono 16-bit PCM (required by whisper-cli) ──────
+WAV_16K="${WAV%.wav}_16k.wav"
+echo "  🔄  Converting to 16kHz PCM..."
+ffmpeg -y -i "$WAV" -ar 16000 -ac 1 -c:a pcm_s16le "$WAV_16K" -loglevel error
+if [ $? -ne 0 ] || [ ! -f "$WAV_16K" ]; then
+    echo "  ❌  ffmpeg conversion failed"
+    exit 1
+fi
+echo "  ✓  Converted: $(basename $WAV_16K)"
 echo ""
 
 # ── Transcribe ──────────────────────────────────────────────────────
 echo "  🧠  Transcribing..."
 echo ""
 
-TRANSCRIPT=$(whisper-cli 
-    -m "$MODEL" 
-    -f "$WAV" 
-    -l en 
-    --no-prints 
-    --no-timestamps 
+TRANSCRIPT=$(whisper-cli \
+    -m "$MODEL" \
+    -f "$WAV_16K" \
+    -l en \
+    --no-prints \
+    --no-timestamps \
     2>/dev/null)
 
 echo "  ┌─────────────────────────────────┐"
@@ -104,5 +121,5 @@ else
     echo "  ✅  STT is working!"
 fi
 
-rm -f "$WAV"
+rm -f "$WAV" "$WAV_16K"
 echo ""
