@@ -389,91 +389,28 @@ def _record_wav(wav_path: str, duration: float) -> bool:
 
 
 def listen(timeout: float = QUESTION_TIMEOUT) -> str:
-    """Record speech then transcribe with whisper-cli.
+    """Record a single continuous audio clip then transcribe with whisper-cli.
 
-    Uses VAD to detect end-of-speech so we stop recording as soon as the
-    user goes quiet — no fixed sleep. Records 1s chunks, accumulates audio,
-    stops after detecting speech followed by silence (or timeout).
+    Records for `duration` seconds in one uninterrupted recording — identical
+    to what --test-mic does. Fragmented chunk-based recording loses audio in
+    the gaps between process restarts. Whisper's built-in VAD handles silence.
     """
     import tempfile
 
-    tmp = Path(tempfile.gettempdir())
-    chunk_path = str(tmp / "jarvis_chunk.wav")
-    accumulated = str(tmp / "jarvis_listen_full.wav")
+    wav = str(Path(tempfile.gettempdir()) / "jarvis_listen.wav")
 
-    # Clean up any leftover files
-    for p in (chunk_path, accumulated, chunk_path + ".raw.wav"):
-        try:
-            Path(p).unlink(missing_ok=True)
-        except Exception:
-            pass
+    # Cap at 8s for a natural utterance — enough for any question.
+    # For conversation follow-ups timeout=CONVERSATION_IDLE_TIMEOUT (15s),
+    # but we still cap at 8s since nobody speaks for longer than that.
+    duration = min(timeout, 8.0)
 
-    CHUNK = 1.0        # seconds per recording slice
-    SILENCE_AFTER = 1  # silent chunks after speech before stopping (1s)
-    MAX_SPEECH = 8     # max seconds of speech before forcing transcription
-
-    speech_chunks = 0
-    silence_chunks = 0
-    all_pcm = b""
-    deadline = time.time() + timeout
-
-    SCREEN.update(status="Waiting for speech...")
-
-    while time.time() < deadline:
-        ok = _record_wav(chunk_path, CHUNK)
-        if not ok:
-            break
-
-        # Read PCM to check energy
-        try:
-            result = subprocess.run(
-                ["ffmpeg", "-hide_banner", "-loglevel", "error",
-                 "-i", chunk_path, "-ar", "16000", "-ac", "1",
-                 "-f", "s16le", "-"],
-                capture_output=True, timeout=5
-            )
-            pcm = result.stdout
-        except Exception:
-            pcm = b""
-
-        rms = compute_rms(pcm) if pcm else 0
-        has_speech = rms > ENERGY_THRESHOLD
-
-        if has_speech:
-            speech_chunks += 1
-            silence_chunks = 0
-            all_pcm += pcm
-            SCREEN.update(status="Hearing you...")
-        elif speech_chunks > 0:
-            silence_chunks += 1
-            all_pcm += pcm  # keep the trailing silence for natural audio
-            SCREEN.update(status="Got it, processing...")
-            if silence_chunks >= SILENCE_AFTER:
-                break  # speech ended
-        else:
-            # No speech yet — keep waiting
-            SCREEN.update(status="Waiting for speech...")
-
-        if speech_chunks * CHUNK >= MAX_SPEECH:
-            break
-
-    if not all_pcm:
-        return ""
-
-    # Write accumulated PCM to a WAV for whisper-cli
-    try:
-        import wave as _wave
-        with _wave.open(accumulated, "wb") as wf:
-            wf.setnchannels(1)
-            wf.setsampwidth(2)
-            wf.setframerate(16000)
-            wf.writeframes(all_pcm)
-    except Exception as e:
-        log(f"listen: WAV write error: {e}")
+    SCREEN.update(status=f"Listening... ({duration:.0f}s)")
+    ok = _record_wav(wav, duration)
+    if not ok:
         return ""
 
     SCREEN.update(status="Transcribing your speech...")
-    return _transcribe_wav(accumulated)
+    return _transcribe_wav(wav)
 
 def listen_long(timeout: float = QUESTION_TIMEOUT) -> str:
     return listen(timeout)
@@ -800,7 +737,7 @@ class JarvisTUI:
         try:
             if not question:
                 # Say "Yes?" in background so mic opens immediately after
-                render("listening", "Ask your question...")
+                render("listening", "Ask your question — I'm recording for 8s")
                 threading.Thread(
                     target=lambda: subprocess.run(
                         ["termux-tts-speak", "Yes?"],
@@ -820,7 +757,7 @@ class JarvisTUI:
                 SCREEN.update(answer=response)
                 render("speaking", "Answering...")
                 speak(response)
-                render("listening", "Your turn — speak or stay silent to end")
+                render("listening", "Your turn — speak now or stay silent to end")
                 question = listen(timeout=CONVERSATION_IDLE_TIMEOUT)
                 SCREEN.update(question=question or "")
 
