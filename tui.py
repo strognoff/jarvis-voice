@@ -1400,9 +1400,17 @@ class VADLoop:
         else:
             SCREEN.update(status="⚠ No WebRTC VAD — energy fallback")
 
-    def _record_chunk(self, wav_path: str, duration_s: float):
-        """Record audio for duration_s seconds, then kill the process."""
+    # Consecutive stop-command failures before we declare the mic service dead
+    _MAX_MIC_FAILURES = 3
+
+    def _record_chunk(self, wav_path: str, duration_s: float) -> bool:
+        """Record audio for duration_s seconds, kill the process, return True on success.
+
+        Returns False if the stop command failed (caller tracks consecutive failures).
+        Always kills by PID directly — never relies solely on -q when we know it may hang.
+        """
         proc = None
+        stop_ok = True
         try:
             proc = subprocess.Popen(
                 ['termux-microphone-record', '-f', wav_path],
@@ -1410,7 +1418,8 @@ class VADLoop:
                 start_new_session=True
             )
             time.sleep(duration_s)
-            # Graceful stop
+
+            # Try graceful stop, but don't wait long — we'll kill by PID regardless
             try:
                 subprocess.run(
                     ['termux-microphone-record', '-q'],
@@ -1419,16 +1428,21 @@ class VADLoop:
                 )
             except Exception as e:
                 log_warn(f"[vad] stop command failed: {e}")
-            # Wait; escalate if it doesn't exit
+                stop_ok = False
+
+            # Always kill the recorder proc by PID — don't trust -q alone
             try:
-                proc.wait(timeout=2)
+                proc.wait(timeout=1)
             except subprocess.TimeoutExpired:
-                log_warn("[vad] recorder stuck — force killing")
                 _force_kill_proc(proc, "vad _record_chunk")
+
         except Exception as e:
             log_exception("[vad] _record_chunk failed", e)
+            stop_ok = False
             if proc is not None:
                 _force_kill_proc(proc, "vad _record_chunk (exception path)")
+
+        return stop_ok
 
     def _read_pcm_frames(self, wav_file: Path):
         """Convert WAV to raw 16kHz PCM frames via ffmpeg."""
@@ -1456,6 +1470,8 @@ class VADLoop:
         min_speech = 3
         min_silence = silence_threshold_frames
         is_speaking = False
+        consecutive_failures = 0
+        backoff = 5.0   # seconds to wait after mic service declared dead
 
         while self.running:
             # Remove old file
@@ -1465,8 +1481,28 @@ class VADLoop:
                 except Exception:
                     pass
 
-            # Record 1 second chunk
-            self._record_chunk(str(wav_file), 1.0)
+            # Record 1 second chunk — returns False if stop command failed
+            stop_ok = self._record_chunk(str(wav_file), 1.0)
+
+            if not stop_ok:
+                consecutive_failures += 1
+                if consecutive_failures >= self._MAX_MIC_FAILURES:
+                    log_error(
+                        f"[vad] mic service unresponsive after {consecutive_failures} "
+                        f"consecutive failures — backing off {backoff:.0f}s then restarting"
+                    )
+                    SCREEN.update(status=f"⚠ Mic stuck — retrying in {backoff:.0f}s")
+                    time.sleep(backoff)
+                    backoff = min(backoff * 2, 30.0)   # cap at 30s
+                    consecutive_failures = 0
+                    # Exit loop — watchdog or _resume_vad will start a fresh VADLoop
+                    self.running = False
+                    break
+                continue
+            else:
+                if consecutive_failures > 0:
+                    log(f"[vad] mic service recovered after {consecutive_failures} failure(s)")
+                consecutive_failures = 0
 
             if not wav_file.exists() or wav_file.stat().st_size < 512:
                 continue
@@ -1698,17 +1734,25 @@ class JarvisTUI:
         self._vad_thread = _watched_thread("vad-loop", self.vad.vad_loop, self.on_wake)
         self._vad_thread.start()
 
-        # Watchdog — every 60s: dump threads + detect if VAD died unexpectedly.
-        # Only fires when app state is "idle" — during a conversation VAD is
-        # intentionally paused so self._vad_thread being dead is normal.
+        # Watchdog — polls every 5s for a dead VAD thread (fast recovery after
+        # mic-stuck backoff), and dumps threads every 60s for diagnostics.
+        # Only restarts VAD when state is "idle" — during conversations VAD is
+        # intentionally paused so the thread being dead is normal.
         def _watchdog_fn():
+            last_dump = time.time()
             while self.running:
-                time.sleep(60)
+                time.sleep(5)
                 if not self.running:
                     break
-                _log_thread_dump()
+
+                # Thread dump every 60s
+                if time.time() - last_dump >= 60:
+                    _log_thread_dump()
+                    last_dump = time.time()
+
+                # Restart VAD if it died while idle
                 if not self._vad_thread.is_alive() and self.state == "idle":
-                    log_error("VAD thread died while idle — attempting restart")
+                    log_error("VAD thread not alive while idle — restarting")
                     try:
                         self._resume_vad()
                     except Exception as exc:
