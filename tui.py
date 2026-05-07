@@ -48,8 +48,8 @@ WAKE_WORD = os.environ.get("JARVIS_WAKE_WORD", "hey jarvis").strip().lower()
 REQUIRE_WAKE_WORD = os.environ.get("JARVIS_REQUIRE_WAKE_WORD", "0").lower() not in ("0", "false", "no")
 QUESTION_TIMEOUT = float(os.environ.get("JARVIS_QUESTION_TIMEOUT", "45"))
 CONVERSATION_IDLE_TIMEOUT = float(os.environ.get("JARVIS_CONVERSATION_IDLE_TIMEOUT", "15"))
-STT_CONTINUATION_TIMEOUT = float(os.environ.get("JARVIS_STT_CONTINUATION_TIMEOUT", "2.5"))
-STT_MAX_PARTS = int(os.environ.get("JARVIS_STT_MAX_PARTS", "2"))
+STT_CONTINUATION_TIMEOUT = float(os.environ.get("JARVIS_STT_CONTINUATION_TIMEOUT", "8.0"))
+STT_MAX_PARTS = int(os.environ.get("JARVIS_STT_MAX_PARTS", "3"))
 TTS_SETTLE_SECONDS = float(os.environ.get("JARVIS_TTS_SETTLE_SECONDS", "0.8"))
 TTS_WORDS_PER_MINUTE = float(os.environ.get("JARVIS_TTS_WORDS_PER_MINUTE", "155"))
 TTS_MAX_WAIT_SECONDS = float(os.environ.get("JARVIS_TTS_MAX_WAIT_SECONDS", "18"))
@@ -200,10 +200,23 @@ def wait_for_tts(text: str):
     time.sleep(delay)
 
 def best_transcript(lines):
-    """Pick the most complete Android STT partial."""
+    """Pick the most complete Android STT result.
+
+    Android STT streams incremental partials line-by-line; the LAST line is
+    always the final, most complete result.  Using max(word-count) incorrectly
+    favours an earlier partial and silently drops the tail of the utterance
+    (e.g. "Tell me a story" → output: "Tell me a" / "story" → picks "Tell me a").
+    We return the last line, but fall back to the longest if it is suspiciously
+    short compared to what came before (handles rare resets mid-utterance).
+    """
     if not lines:
         return ""
-    return max(lines, key=lambda line: (len(line.split()), len(line)))
+    last = lines[-1]
+    longest = max(lines, key=lambda l: (len(l.split()), len(l)))
+    # Prefer last line; only fall back to longest if last is dramatically shorter
+    if len(last.split()) < len(longest.split()) // 2:
+        return longest
+    return last
 
 def listen(timeout: float = QUESTION_TIMEOUT) -> str:
     """Use termux-speech-to-text to capture and transcribe speech."""
@@ -223,6 +236,14 @@ def listen(timeout: float = QUESTION_TIMEOUT) -> str:
         return ""
 
 def merge_transcripts(parts):
+    """Merge STT partial results into one coherent transcript.
+
+    Handles three cases:
+    - Exact duplicate / subset: discard the shorter one
+    - Cumulative extension: keep the longer one
+    - Genuinely new words: append, stripping any overlapping suffix/prefix
+      so we don't get doubled words like "Tell me a a story"
+    """
     merged = ""
     for part in (p.strip() for p in parts if p and p.strip()):
         if not merged:
@@ -230,12 +251,26 @@ def merge_transcripts(parts):
             continue
         lower_merged = merged.lower()
         lower_part = part.lower()
+        # Part is already contained in merged — skip
         if lower_part in lower_merged:
             continue
+        # Merged is a prefix of part — part is the better cumulative result
         if lower_merged in lower_part:
             merged = part
             continue
-        merged = f"{merged} {part}"
+        # Try to find an overlapping suffix of merged / prefix of part
+        # to avoid doubling words at the join boundary
+        merged_words = lower_merged.split()
+        part_words = lower_part.split()
+        overlap = 0
+        for n in range(min(len(merged_words), len(part_words), 4), 0, -1):
+            if merged_words[-n:] == part_words[:n]:
+                overlap = n
+                break
+        new_words = part.split()[overlap:]
+        if new_words:
+            merged = merged + " " + " ".join(new_words)
+        # else: full overlap, nothing new to add
     return merged.strip()
 
 def listen_long(timeout: float = QUESTION_TIMEOUT) -> str:
