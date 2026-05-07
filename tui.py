@@ -478,8 +478,9 @@ class VADLoop:
         When speech ends (silence_threshold_frames consecutive silence),
         trigger on_wake callback with the speech audio captured so far.
         """
-        work_dir = Path("/data/data/com.termux/files/home/jarvis-voice")
-        wav_file = work_dir / "vad_chunk.wav"
+        import tempfile as _tempfile
+        work_dir = Path(_tempfile.gettempdir())
+        wav_file = work_dir / "jarvis_vad_chunk.wav"
 
         speech_frames = 0
         silence_frames = 0
@@ -488,41 +489,49 @@ class VADLoop:
         is_speaking = False
         threshold = ENERGY_THRESHOLD  # local alias, avoids late binding issues in loops
 
-        while self.running:
-            # ── S1: Remove old files ────────────────────────────────
-            for f in (wav_file,):
-                if f.exists():
-                    try:
-                        os.remove(f)
-                    except Exception:
-                        pass
+        CHUNK_DURATION = 1.0  # seconds per recording slice
 
-            # Use lock so test functions can record without race conditions
+        while self.running:
+            # ── S1: Remove old file ─────────────────────────────────
+            if wav_file.exists():
+                try:
+                    os.remove(wav_file)
+                except Exception:
+                    pass
+
+            # ── S2: Record one chunk via start → sleep → explicit stop
+            # The termux-microphone-record -l <n> duration flag is unreliable:
+            # the process often ignores it and never exits, so proc.wait()
+            # always hits TimeoutExpired and prints the "was terminated" warning.
+            # The correct approach: start without -l, sleep the desired duration,
+            # then stop cleanly with `-q` (the official quit command).
             with _recording_lock:
-                # termux-microphone-record streams output to stdout as it records,
-                # so we must NOT let subprocess.run() collect it (that causes
-                # communicate() to hang indefinitely and trigger TimeoutExpired).
-                # We Popen with devnull output FDs so the process runs freely;
-                # a SIGTERM after timeout is the backup if it gets stuck.
                 try:
                     proc = subprocess.Popen(
-                        ['termux-microphone-record', '-f', str(wav_file), '-l', '1'],
+                        ['termux-microphone-record', '-f', str(wav_file)],
                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                         start_new_session=True
                     )
-                    ret = proc.wait(timeout=5)
+                    time.sleep(CHUNK_DURATION)
+                    # Explicitly stop the recording — this is the correct termux API
+                    subprocess.run(
+                        ['termux-microphone-record', '-q'],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        timeout=3
+                    )
+                    proc.wait(timeout=3)
                 except subprocess.TimeoutExpired:
-                    proc.terminate()
-                    proc.wait(timeout=1)
-                    print('[vad] ⚠ termux-mic timed out — was terminated')
-                    continue
-
-                if ret != 0:
-                    print(f'[vad] ⚠ termux-mic exited with code {ret}')
+                    try:
+                        proc.terminate()
+                        proc.wait(timeout=1)
+                    except Exception:
+                        pass
+                except Exception as e:
+                    log(f"[vad] record error: {e}")
                     continue
 
                 if not self._wait_for_recording(wav_file):
-                    print('[vad] ⚠ recording did not finish writing')
+                    log('[vad] ⚠ recording did not finish writing')
                     continue
 
             # ── S4: Check WAV was created ──────────────────────
@@ -611,58 +620,83 @@ class JarvisTUI:
             self.pending_intent = None
         return response
 
+    def _pause_vad(self):
+        """Stop the VAD recording loop so it doesn't compete with termux-speech-to-text.
+        Sleeps long enough for the current in-flight recording chunk to finish and
+        release the microphone before termux-speech-to-text starts."""
+        if self.vad:
+            self.vad.stop()
+            # One VAD chunk is 1 s of recording + up to ~0.3 s for -q stop.
+            # Wait 1.5 s to be safe before handing the mic to STT.
+            time.sleep(1.5)
+
+    def _resume_vad(self):
+        """Restart the VAD recording loop in a fresh thread after a conversation ends."""
+        if self.vad:
+            self.vad.start()
+            t = threading.Thread(
+                target=self.vad.vad_loop, args=(self.on_wake,), daemon=True
+            )
+            t.start()
+
     def on_wake(self):
         """Called when VAD detects end of speech utterance."""
         if self.state != "idle":
             return
         log("Wake detected")
-        self.state = "listening"
+        # Mark busy immediately so re-entrant VAD firings are ignored
+        self.state = "busy"
         self.pending_intent = None
-        question = ""
 
-        if REQUIRE_WAKE_WORD:
-            render("listening", f'Listening for "{WAKE_WORD}"...')
-            text = listen_long()
-            SCREEN.update(question=text or "")
-            is_wake, question = extract_question(text)
+        # Stop VAD recording — termux mic can only be used by one process at a time.
+        # While we're in conversation, termux-speech-to-text owns the microphone.
+        self._pause_vad()
 
-            if not is_wake:
-                if text:
-                    log(f"Ignored speech without wake phrase: {text}")
-                self.state = "idle"
-                render("idle", f'Waiting for "{WAKE_WORD}"...')
-                return
+        try:
+            question = ""
 
-        if not question:
-            spoken = speak("Yes?")
-            wait_for_tts(spoken)
-            render("listening", "Listening for your question...")
-            question = listen_long()
-            SCREEN.update(question=question or "")
+            if REQUIRE_WAKE_WORD:
+                render("listening", f'Listening for "{WAKE_WORD}"...')
+                text = listen_long()
+                SCREEN.update(question=text or "")
+                is_wake, question = extract_question(text)
 
-        while question:
-            log(f"You: {question}")
-            self.state = "thinking"
-            render("thinking", "Thinking...")
-            response = self.answer_question(question)
-            SCREEN.update(answer=response)
-            log(f"Jarvis: {response}")
-            self.state = "speaking"
-            render("speaking", "Speaking...")
-            spoken = speak(response)
-            wait_for_tts(spoken)
-            self.state = "listening"
-            render("listening", "Listening for your reply...")
-            question = listen_long(timeout=CONVERSATION_IDLE_TIMEOUT)
-            SCREEN.update(question=question or "")
+                if not is_wake:
+                    if text:
+                        log(f"Ignored speech without wake phrase: {text}")
+                    return
 
-        if not question:
-            log("(no speech detected)")
-            render("idle", f'No reply for {CONVERSATION_IDLE_TIMEOUT:.0f}s. Waiting for "{WAKE_WORD}"...')
-            time.sleep(1)
+            if not question:
+                spoken = speak("Yes?")
+                wait_for_tts(spoken)
+                render("listening", "Listening for your question...")
+                question = listen_long()
+                SCREEN.update(question=question or "")
 
-        self.state = "idle"
-        render("idle", f'Waiting for "{WAKE_WORD}"...')
+            while question:
+                log(f"You: {question}")
+                self.state = "thinking"
+                render("thinking", "Thinking...")
+                response = self.answer_question(question)
+                SCREEN.update(answer=response)
+                log(f"Jarvis: {response}")
+                self.state = "speaking"
+                render("speaking", "Speaking...")
+                spoken = speak(response)
+                wait_for_tts(spoken)
+                # Listen for a follow-up — STT owns the mic here, VAD is paused
+                self.state = "listening"
+                render("listening", "Listening for your reply...")
+                question = listen_long(timeout=CONVERSATION_IDLE_TIMEOUT)
+                SCREEN.update(question=question or "")
+
+            log(f"Conversation ended (no reply after {CONVERSATION_IDLE_TIMEOUT:.0f}s)")
+
+        finally:
+            # Always restore state and restart VAD, even on exceptions
+            self.state = "idle"
+            render("idle", f'Waiting for "{WAKE_WORD}"...')
+            self._resume_vad()
 
     def run(self):
         print_banner()
@@ -703,11 +737,10 @@ class JarvisTUI:
 
 def test_vad_synthetic():
     """Test VAD on generated synthetic audio (no microphone needed). Returns (ok, message)."""
-    import webrtcvad, wave, struct, math, os
+    import webrtcvad, wave, struct, math, os, tempfile
     from pathlib import Path
 
-    work_dir = Path("/data/data/com.termux/files/home/jarvis-voice")
-    wav_file = work_dir / "vad_synthetic_test.wav"
+    wav_file = Path(tempfile.gettempdir()) / "jarvis_vad_synthetic_test.wav"
 
     print("  🎙️  Testing WebRTC VAD on synthetic audio (no microphone)", flush=True)
 
@@ -740,7 +773,7 @@ def test_vad_synthetic():
         chunk = audio[i:i+frame_size]
         n_total += 1
         try:
-            is_sp = vad.is_speech(chunk, SAMPLE_RATE, 480)
+            is_sp = vad.is_speech(chunk, SAMPLE_RATE)
         except Exception:
             is_sp = False
         if is_sp:
@@ -766,8 +799,7 @@ def test_mic_vad():
     """Test microphone recording + VAD on real audio. Returns (ok, message)."""
     import tempfile, webrtcvad, wave, struct, os, subprocess
 
-    work_dir = Path("/data/data/com.termux/files/home/jarvis-voice")
-    wav_file = work_dir / "vad_test_chunk.wav"
+    wav_file = Path(tempfile.gettempdir()) / "jarvis_vad_test_chunk.wav"
 
     # Remove existing file (termux-mic refuses to overwrite)
     if wav_file.exists():
@@ -777,17 +809,28 @@ def test_mic_vad():
             pass
 
     # Step 1: Record 3 seconds directly to WAV
+    # Use start→sleep→stop(-q) instead of -l 3, because the -l duration flag
+    # is unreliable on many Termux versions and causes the process to hang.
     print("  🎤 Recording 3 seconds from microphone...", flush=True)
     print("     (Speak clearly during these 3 seconds)", flush=True)
 
     with _recording_lock:
         record_proc = subprocess.Popen(
-            f'termux-microphone-record -f {wav_file} -l 3',
-            shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            ['termux-microphone-record', '-f', str(wav_file)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True
         )
-        ret = record_proc.wait()
-        if ret == 0:
-            wait_for_termux_recording(wav_file, 5.0)
+        time.sleep(3.0)
+        subprocess.run(
+            ['termux-microphone-record', '-q'],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=3
+        )
+        try:
+            record_proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            record_proc.terminate()
+        wait_for_termux_recording(wav_file, 5.0)
 
     if not wav_file.exists():
         return False, "Microphone file not created — is Termux microphone permission granted?"
@@ -826,9 +869,8 @@ def test_mic_vad():
     for i in range(0, len(audio) - frame_size, frame_size):
         chunk = audio[i:i+frame_size]
         n_total += 1
-        num_samples = len(chunk) // 2
         try:
-            is_sp = vad.is_speech(chunk, rate, num_samples)
+            is_sp = vad.is_speech(chunk, rate)
         except Exception:
             is_sp = False
         n = len(chunk) // 2
@@ -871,8 +913,11 @@ def _kill_existing_recording():
                    capture_output=True, timeout=5)
     time.sleep(0.5)
 
-def test_mic(duration=3.0, out_path='/data/data/com.termux/files/home/jarvis-voice/mic_test.wav'):
+def test_mic(duration=3.0, out_path=None):
     """Quick mic test — records `duration` seconds, checks file, plays it back."""
+    import tempfile
+    if out_path is None:
+        out_path = str(Path(tempfile.gettempdir()) / "jarvis_mic_test.wav")
     wav_file = Path(out_path)
     # Remove existing file (termux-mic refuses to overwrite)
     if wav_file.exists():
@@ -883,14 +928,24 @@ def test_mic(duration=3.0, out_path='/data/data/com.termux/files/home/jarvis-voi
 
     print(f"🎤 Recording {duration}s... (speak clearly)")
 
+    # Use start→sleep→stop(-q): the -l duration flag is unreliable and hangs.
     with _recording_lock:
         proc = subprocess.Popen(
-            f'termux-microphone-record -f {wav_file} -l {int(duration)}',
-            shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            ['termux-microphone-record', '-f', str(wav_file)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True
         )
-        ret = proc.wait()
-        if ret == 0:
-            wait_for_termux_recording(wav_file, duration + 2.0)
+        time.sleep(duration)
+        subprocess.run(
+            ['termux-microphone-record', '-q'],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=3
+        )
+        try:
+            proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            proc.terminate()
+        wait_for_termux_recording(wav_file, duration + 2.0)
 
     if not wav_file.exists():
         print(f"❌ FAIL — file not created: {wav_file}")
