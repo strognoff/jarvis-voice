@@ -6,7 +6,8 @@
 
 ## Features
 
-- 🎤 **Continuous voice monitoring** — WebRTC VAD detects when you start/stop speaking
+- 🎤 **Continuous voice monitoring** — WebRTC VAD detects speech activity without keeping STT open
+- 👂 **Wake flow** — say `Hey Jarvis`, then ask follow-up questions naturally
 - 🤖 **OpenClaw AI** — sends transcribed commands to an OpenClaw sub-session for rich responses
 - 🔊 **On-device TTS** — reads responses aloud via `termux-tts-speak` (no API keys)
 - 😊 **Animated emoji face** — shows current state (idle / listening / thinking / speaking)
@@ -54,7 +55,7 @@ python3 tui.py --test-mic
 # Configure (optional — defaults work for local OpenClaw)
 export JARVIS_GATEWAY_URL="http://localhost:18789"
 export JARVIS_AUTH_TOKEN="your-gateway-token"
-export JARVIS_SESSION="agent:main:subagent:jarvis-tui"
+export JARVIS_OPENCLAW_SESSION_ID="jarvis-tui"
 
 # Run!
 python3 tui.py
@@ -66,12 +67,12 @@ python3 tui.py
 
 ```
 [Mic] ──► [WebRTC VAD always-on loop]
-              500ms chunks → 16k mono PCM → 30ms frames
+              short chunks → 16k mono PCM → 30ms frames
               Energy fallback (RMS > 800)
-              End of speech at ~2.5s silence
+              Speech activity wakes STT
                     │
                     ▼
-         [termux-speech-to-text: Android STT]
+       [termux-speech-to-text: capture the question]
                     │
                     ▼
           [OpenClaw sub-session: jarvis-tui]
@@ -80,11 +81,12 @@ python3 tui.py
         [termux-tts-speak + animated emoji face]
 ```
 
-1. **VAD loop** — always-on, records 500ms chunks, runs through WebRTC VAD. Detects speech start + end of utterance (at ~2.5s natural pause)
-2. **STT** — `termux-speech-to-text` (Android's built-in, no API key)
-3. **AI response** — sends text to OpenClaw sub-session, gets reply
-4. **TTS** — speaks response via `termux-tts-speak`
-5. **Face** — animated emoji states in terminal
+1. **VAD loop** — always-on, records short chunks, converts them to raw 16 kHz mono PCM, and checks valid 30 ms WebRTC VAD frames
+2. **Wake** — saying `Hey Jarvis` creates speech activity, Jarvis wakes, and then starts Android STT
+3. **Conversation** — ask the question after Jarvis says `Yes?`; follow-up replies do not need `Hey Jarvis`
+4. **AI response** — sends each turn to the same OpenClaw sub-session, with a local fallback if the gateway is unavailable
+5. **Idle timeout** — after 15 seconds of silence, Jarvis returns to waiting for `Hey Jarvis`
+6. **TTS + face** — speaks via `termux-tts-speak` and animates the emoji state in the terminal
 
 ---
 
@@ -95,12 +97,30 @@ The VAD is configured for natural conversation pauses:
 | Parameter | Value | Meaning |
 |-----------|-------|---------|
 | Energy threshold | 800 RMS | Sensitivity for quiet speech |
-| Silence threshold | 5 frames (~2.5s) | Wait this long after speech ends to trigger |
-| Min speech frames | 2 frames (60ms) | Minimum speech to count as speaking |
+| Silence threshold | 5 frames (~150ms of VAD frames) | Speech-end confirmation before wake check |
+| Min speech frames | 4 frames (120ms) | Minimum speech to count as speaking |
 
-### Why not "Hey Jarvis" wake phrase detection?
+### Wake phrase behavior
 
-This VAD responds to **any speech** — not a specific wake word. Say anything, pause for 2-3 seconds, and Jarvis processes it. A proper "Hey Jarvis" phrase detector (like Silero VAD's keyword spotting) would need PyTorch, which isn't available on this platform.
+WebRTC VAD detects speech activity, not words. Jarvis therefore uses VAD to decide when to wake, then starts Android STT for the question. This avoids needing to say `Hey Jarvis` twice.
+
+You can tune this with:
+
+```bash
+export JARVIS_WAKE_WORD="hey jarvis"
+export JARVIS_REQUIRE_WAKE_WORD=0
+export JARVIS_QUESTION_TIMEOUT=45
+export JARVIS_CONVERSATION_IDLE_TIMEOUT=15
+export JARVIS_STT_CONTINUATION_TIMEOUT=2.5
+export JARVIS_STT_MAX_PARTS=2
+export JARVIS_TTS_SETTLE_SECONDS=0.8
+export JARVIS_TTS_WORDS_PER_MINUTE=155
+export JARVIS_TTS_MAX_WAIT_SECONDS=18
+export JARVIS_OPENCLAW_SESSION_ID="jarvis-tui"
+export JARVIS_OPENCLAW_TIMEOUT=90
+```
+
+Set `JARVIS_REQUIRE_WAKE_WORD=1` if you want Android STT to confirm the wake phrase, but that mode may require saying `Hey Jarvis` again because STT starts after VAD wakes.
 
 ---
 
@@ -139,12 +159,11 @@ Check available voices: `termux-tts-engines`
 
 ## OpenClaw Integration
 
-Connects as a sub-session (`agent:main:subagent:jarvis-tui`):
+Connects to OpenClaw through `openclaw agent` using a stable session id, so every voice turn is appended to the same OpenClaw chat context:
 
 ```bash
-export JARVIS_GATEWAY_URL="http://localhost:18789"
-export JARVIS_AUTH_TOKEN="your-token"
-export JARVIS_SESSION="agent:main:subagent:jarvis-tui"
+export JARVIS_OPENCLAW_SESSION_ID="jarvis-tui"
+export JARVIS_OPENCLAW_TIMEOUT=90
 ```
 
 ### Local fallback
@@ -187,7 +206,7 @@ pkill -f tui.py
 
 | Issue | Cause | Workaround |
 |-------|-------|------------|
-| No wake word phrase | No PyTorch for Silero VAD | VAD responds to any speech |
+| Wake is VAD-based by default | WebRTC VAD detects voice, not words | Use a quiet environment, or set `JARVIS_REQUIRE_WAKE_WORD=1` for stricter STT wake confirmation |
 | No `faster-whisper` | No ctranslate2 cp313 wheel | Use termux-speech-to-text |
 | No `torch` | download.pytorch.org blocked | WebRTC VAD instead |
 | No `numpy` | No cp313 Android ARM64 wheel | Pure Python RMS fallback |

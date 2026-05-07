@@ -5,8 +5,7 @@
 # We patch webrtcvad to remove pkg_resources dependency (fixed automatically on install)
 webrtcvad>=2.0.10
 
-# HTTP client (for OpenClaw gateway API calls)
-requests>=2.31.0
+# OpenClaw gateway calls use Python's standard library HTTP client.
 
 # ──────────────────────────────────────────────────────────────────────
 # Optional / advanced VAD (requires torch — compatibility varies):
