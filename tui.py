@@ -852,13 +852,13 @@ class JarvisTUI:
 
     def _pause_vad(self):
         """Stop the VAD recording loop so it doesn't compete with termux-speech-to-text.
-        Sleeps long enough for the current in-flight recording chunk to finish and
-        release the microphone before termux-speech-to-text starts."""
+        Explicitly stops any in-flight recording and waits for the mic to be released."""
         if self.vad:
             self.vad.stop()
-            # One VAD chunk is 1 s of recording + up to ~0.3 s for -q stop.
-            # Wait 1.5 s to be safe before handing the mic to STT.
-            time.sleep(1.5)
+            # Stop any in-flight recording and wait for mic to be released
+            subprocess.run(['termux-microphone-record', '-q'],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3)
+            time.sleep(0.5)  # shorter wait since we explicitly stopped the recording
 
     def _resume_vad(self):
         """Restart the VAD recording loop in a fresh thread after a conversation ends."""
@@ -885,53 +885,46 @@ class JarvisTUI:
         try:
             question = ""
 
+            # Step 1: optionally verify wake word
             if REQUIRE_WAKE_WORD:
-                render("listening", f'Listening for "{WAKE_WORD}"...')
-                text = listen_long()
+                render("listening", f'Say "{WAKE_WORD}"...')
+                text = listen(timeout=QUESTION_TIMEOUT)
                 SCREEN.update(question=text or "")
                 is_wake, question = extract_question(text)
-
                 if not is_wake:
                     if text:
                         log(f"Ignored speech without wake phrase: {text}")
-                    return
+                    return  # finally block restores state
 
+            # Step 2: if no question yet, speak "Yes?" then listen AFTER TTS finishes
             if not question:
-                # Pre-roll STT so it's already capturing when the user speaks.
-                # Launch it now, speak "Yes?", then collect — the user's words
-                # are captured from the moment STT starts, not after TTS ends.
-                stt_proc = start_stt_process()
-                spoken = speak("Yes?")
-                wait_for_tts(spoken)
-                render("listening", "Listening for your question...")
-                question = collect_stt_process(stt_proc, QUESTION_TIMEOUT)
+                render("speaking", "")
+                speak("Yes?")          # blocks until TTS done
+                render("listening", "")
+                question = collect_stt_process(start_stt_process(), QUESTION_TIMEOUT)
                 SCREEN.update(question=question or "")
 
+            # Step 3: conversation loop — think → speak → listen, never overlapping
             while question:
                 SCREEN.update(question=question)
-                self.state = "thinking"
-                render("thinking", "Thinking...")
+                render("thinking", "")
                 response = self.answer_question(question)
                 SCREEN.update(answer=response)
-                self.state = "speaking"
-                render("speaking", "Speaking...")
-                # Pre-roll STT during TTS so it captures from the very start
-                # of the user's follow-up, not after a 1-3s STT warm-up delay.
-                stt_proc = start_stt_process()
-                spoken = speak(response)
-                wait_for_tts(spoken)
-                # Listen for a follow-up — STT owns the mic here, VAD is paused
-                self.state = "listening"
-                render("listening", "Listening for your reply...")
-                question = collect_stt_process(stt_proc, CONVERSATION_IDLE_TIMEOUT)
+                render("speaking", "")
+                speak(response)        # blocks until TTS done
+                render("listening", "")
+                question = collect_stt_process(start_stt_process(), CONVERSATION_IDLE_TIMEOUT)
                 SCREEN.update(question=question or "")
 
+            # Step 4: conversation ended by silence
             log(f"Conversation ended (no reply after {CONVERSATION_IDLE_TIMEOUT:.0f}s)")
+            render("speaking", "")
+            speak("Goodbye!")
 
         finally:
             # Always restore state and restart VAD, even on exceptions
             self.state = "idle"
-            render("idle", f'Waiting for "{WAKE_WORD}"...')
+            render("idle", "")
             self._resume_vad()
 
     def run(self):
