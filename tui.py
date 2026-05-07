@@ -196,39 +196,59 @@ def wait_for_tts(text: str):
     words = max(1, len(text.split()))
     estimated = words / max(1.0, TTS_WORDS_PER_MINUTE) * 60.0
     delay = min(TTS_MAX_WAIT_SECONDS, max(TTS_SETTLE_SECONDS, estimated + TTS_SETTLE_SECONDS))
-    log(f"TTS wait: {delay:.1f}s")
     time.sleep(delay)
 
 def best_transcript(lines):
-    """Pick the most complete Android STT result.
+    """Return the single most complete line from a list of STT partials.
 
-    Android STT streams incremental partials line-by-line; the LAST line is
-    always the final, most complete result.  Using max(word-count) incorrectly
-    favours an earlier partial and silently drops the tail of the utterance
-    (e.g. "Tell me a story" → output: "Tell me a" / "story" → picks "Tell me a").
-    We return the last line, but fall back to the longest if it is suspiciously
-    short compared to what came before (handles rare resets mid-utterance).
+    When all lines come from one STT call, prefer the last line (Android's
+    final committed result).  Fall back to the longest if the last line is
+    dramatically shorter (handles rare mid-utterance resets).
     """
     if not lines:
         return ""
     last = lines[-1]
     longest = max(lines, key=lambda l: (len(l.split()), len(l)))
-    # Prefer last line; only fall back to longest if last is dramatically shorter
     if len(last.split()) < len(longest.split()) // 2:
         return longest
     return last
 
 def listen(timeout: float = QUESTION_TIMEOUT) -> str:
-    """Use termux-speech-to-text to capture and transcribe speech."""
+    """Use termux-speech-to-text to capture and transcribe speech.
+
+    Android STT can output lines in two modes:
+      - Cumulative: each line grows ("where is" → "where is Tring")
+        → last line is the complete result
+      - Non-cumulative: each line is a fresh partial for the last phrase
+        ("where is" / "Tring")
+        → all lines must be merged to reconstruct the full sentence
+
+    We detect which mode by checking whether the last line is a superset of
+    the others.  If it is, return it directly.  If not, merge all lines.
+    """
     try:
         result = subprocess.run(
             ["termux-speech-to-text"],
             capture_output=True, text=True, timeout=timeout
         )
         lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-        if len(lines) > 1:
-            log(f"STT partials: {' | '.join(lines[-3:])}")
-        return best_transcript(lines)
+        if not lines:
+            return ""
+
+        if len(lines) == 1:
+            return lines[0]
+
+        SCREEN.update(status=f"STT: {len(lines)} partials")
+
+        # Check if last line already contains all earlier content (cumulative mode)
+        last_lower = lines[-1].lower()
+        all_contained = all(l.lower() in last_lower for l in lines[:-1])
+        if all_contained:
+            # Cumulative mode — last line is the complete transcript
+            return lines[-1]
+
+        # Non-cumulative mode — merge all partial lines into one sentence
+        return merge_transcripts(lines)
     except subprocess.TimeoutExpired:
         return ""
     except Exception as e:
@@ -470,9 +490,8 @@ class VADLoop:
         if HAS_VAD:
             self.vad = webrtcvad.Vad(mode=3)
             self.vad.set_mode(3)
-            log(f"WebRTC VAD initialised (mode 3)")
         else:
-            log("WARNING: WebRTC VAD not available — using energy-only fallback")
+            SCREEN.update(status="⚠ No WebRTC VAD — energy fallback")
 
     def _record_chunk(self, out_path: str, duration_s: float):
         """Record a short audio chunk using termux-microphone-record."""
@@ -566,22 +585,22 @@ class VADLoop:
                     continue
 
                 if not self._wait_for_recording(wav_file):
-                    log('[vad] ⚠ recording did not finish writing')
+                    SCREEN.update(status="⚠ mic: recording not flushed yet")
                     continue
 
             # ── S4: Check WAV was created ──────────────────────
             if not wav_file.exists():
-                print('[vad] ⚠ wav file not created — is mic working?')
+                SCREEN.update(status="⚠ mic: no file — check permission")
                 continue
 
             file_size = wav_file.stat().st_size
             if file_size < 2000:
-                print(f'[vad] ⚠ wav file too small ({file_size}B) — is mic working?')
+                SCREEN.update(status=f"⚠ mic: file too small ({file_size}B)")
                 continue
 
             frames = self._read_pcm_frames(wav_file)
             if not frames:
-                print('[vad] skip: no audio data')
+                SCREEN.update(status="⚠ mic: no PCM data from ffmpeg")
                 continue
 
             for chunk_data in frames:
@@ -607,7 +626,7 @@ class VADLoop:
                     silence_frames += 1
                     if silence_frames >= min_silence:
                         if speech_frames >= min_speech:
-                            log(f"Speech activity ended — frames={speech_frames}, RMS={rms:.0f}")
+                            SCREEN.update(status="Voice detected — waking up...")
                             try:
                                 on_wake()
                             except Exception as e:
