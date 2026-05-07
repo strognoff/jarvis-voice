@@ -505,6 +505,129 @@ def get_response(text: str) -> str:
     else:
         return "I heard you, but I'm not sure how to answer that right now."
 
+# ── VAD Capture Loop ────────────────────────────────────────────────
+class VADLoop:
+    """
+    Continuously records audio in 1s chunks using termux-microphone-record,
+    runs WebRTC VAD on each chunk, and fires a callback when speech is detected
+    followed by silence. This is the wake trigger — no gaps in listening.
+    """
+
+    def __init__(self, sample_rate=SAMPLE_RATE):
+        self.sample_rate = sample_rate
+        self.frame_size = int(sample_rate * FRAME_DURATION_MS / 1000) * 2
+        self.running = False
+        self.vad = None
+        if HAS_VAD:
+            self.vad = webrtcvad.Vad(mode=3)
+        else:
+            SCREEN.update(status="⚠ No WebRTC VAD — energy fallback")
+
+    def _record_chunk(self, wav_path: str, duration_s: float):
+        """Record audio for duration_s seconds, then kill the process."""
+        try:
+            proc = subprocess.Popen(
+                ['termux-microphone-record', '-f', wav_path],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                start_new_session=True
+            )
+            time.sleep(duration_s)
+            # Send stop command, then kill the process
+            subprocess.run(
+                ['termux-microphone-record', '-q'],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=2
+            )
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.terminate()
+        except Exception as e:
+            log(f"[vad] record error: {e}")
+
+    def _read_pcm_frames(self, wav_file: Path):
+        """Convert WAV to raw 16kHz PCM frames via ffmpeg."""
+        try:
+            result = subprocess.run([
+                'ffmpeg', '-hide_banner', '-loglevel', 'error',
+                '-i', str(wav_file),
+                '-ar', str(self.sample_rate), '-ac', '1',
+                '-f', 's16le', '-acodec', 'pcm_s16le', '-'
+            ], capture_output=True, timeout=5, env=MEDIA_ENV)
+            if result.returncode != 0:
+                return []
+            pcm = result.stdout
+            usable = len(pcm) - (len(pcm) % self.frame_size)
+            return [pcm[i:i + self.frame_size] for i in range(0, usable, self.frame_size)]
+        except Exception:
+            return []
+
+    def vad_loop(self, on_wake, silence_threshold_frames=5):
+        import tempfile as _tempfile
+        wav_file = Path(_tempfile.gettempdir()) / "jarvis_vad_chunk.wav"
+
+        speech_frames = 0
+        silence_frames = 0
+        min_speech = 3
+        min_silence = silence_threshold_frames
+        is_speaking = False
+
+        while self.running:
+            # Remove old file
+            if wav_file.exists():
+                try:
+                    wav_file.unlink()
+                except Exception:
+                    pass
+
+            # Record 1 second chunk
+            self._record_chunk(str(wav_file), 1.0)
+
+            if not wav_file.exists() or wav_file.stat().st_size < 512:
+                continue
+
+            frames = self._read_pcm_frames(wav_file)
+            if not frames:
+                continue
+
+            for chunk_data in frames:
+                is_speech = False
+                if self.vad:
+                    try:
+                        is_speech = self.vad.is_speech(chunk_data, self.sample_rate)
+                    except Exception:
+                        pass
+                if compute_rms(chunk_data) > ENERGY_THRESHOLD:
+                    is_speech = True
+
+                if is_speech:
+                    speech_frames += 1
+                    silence_frames = 0
+                    if not is_speaking and speech_frames >= min_speech:
+                        is_speaking = True
+                        render("wake", "Heard something...")
+                elif is_speaking:
+                    silence_frames += 1
+                    if silence_frames >= min_silence:
+                        if speech_frames >= min_speech:
+                            try:
+                                on_wake()
+                            except Exception as e:
+                                log_exception("Wake handler error", e)
+                        speech_frames = 0
+                        silence_frames = 0
+                        is_speaking = False
+                else:
+                    speech_frames = 0
+                    silence_frames = 0
+
+    def start(self):
+        self.running = True
+
+    def stop(self):
+        self.running = False
+
+
 # ── Main Jarvis TUI ──────────────────────────────────────────────────
 
 class JarvisTUI:
@@ -512,6 +635,52 @@ class JarvisTUI:
         self.state = "idle"
         self.running = False
         self.pending_intent = None
+        self.vad = None
+
+    def _pause_vad(self):
+        """Stop VAD and release mic before STT takes over."""
+        if self.vad:
+            self.vad.stop()
+            # Explicitly stop any in-flight recording
+            subprocess.run(
+                ['termux-microphone-record', '-q'],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=3
+            )
+            time.sleep(0.5)
+
+    def _resume_vad(self):
+        """Restart VAD in a fresh thread after conversation ends."""
+        if self.vad:
+            self.vad.start()
+            threading.Thread(
+                target=self.vad.vad_loop, args=(self.on_wake,), daemon=True
+            ).start()
+
+    def on_wake(self):
+        """Called by VADLoop when speech+silence detected."""
+        if self.state != "idle":
+            return
+        self.state = "busy"
+        self._pause_vad()
+        try:
+            # Run a short STT to check for wake word
+            render("listening", f'Say "{WAKE_WORD}"...')
+            heard = listen(timeout=WAKE_WORD_TIMEOUT)
+            if not heard:
+                return
+            is_wake, question = extract_question(heard)
+            if not is_wake:
+                log(f"No wake word in: '{heard}'")
+                return
+            render("wake", "")
+            self._do_conversation(question)
+        except Exception as e:
+            log_exception("on_wake error", e)
+        finally:
+            self.state = "idle"
+            render("idle", f'Say "{WAKE_WORD}" to wake me')
+            self._resume_vad()
 
     def answer_question(self, question: str) -> str:
         response = send_message(SESSION_KEY, question)
@@ -570,7 +739,8 @@ class JarvisTUI:
             SCREEN.update(state="idle", status=f'Say "{WAKE_WORD}" to wake me')
 
     def run(self):
-        missing = [cmd for cmd in ("termux-tts-speak", "termux-speech-to-text")
+        missing = [cmd for cmd in ("termux-tts-speak", "termux-speech-to-text",
+                                   "termux-microphone-record")
                    if shutil.which(cmd) is None]
         if missing:
             sys.stdout.write("\033[?25h")
@@ -582,37 +752,31 @@ class JarvisTUI:
         log(f"Gateway: {GATEWAY_URL}  Session: {SESSION_KEY}")
 
         self.running = True
+        self.vad = VADLoop()
 
-        # Animation ticker runs in background
+        # Animation ticker
         def _ticker():
             while self.running:
                 SCREEN.tick()
                 time.sleep(0.25)
         threading.Thread(target=_ticker, daemon=True).start()
 
+        # Start VAD loop
+        self.vad.start()
+        vad_thread = threading.Thread(
+            target=self.vad.vad_loop, args=(self.on_wake,), daemon=True
+        )
+        vad_thread.start()
+
         render("idle", f'Say "{WAKE_WORD}" to wake me')
 
         try:
             while self.running:
-                # ── Wake word detection ──────────────────────────────
-                # Simply loop termux-speech-to-text and check for the wake word.
-                # This replaces the entire VAD + mic-record pipeline with one
-                # reliable call. No file flushing, no ffmpeg, no frame counting.
-                render("idle", f'Say "{WAKE_WORD}" to wake me')
-                heard = listen(timeout=WAKE_WORD_TIMEOUT)
-                if not heard:
-                    continue
-                is_wake, question = extract_question(heard)
-                if not is_wake:
-                    log(f"No wake word in: '{heard}'")
-                    continue
-                # Wake word confirmed — start conversation
-                render("wake", "")
-                self._do_conversation(question)
-
+                time.sleep(0.5)
         except KeyboardInterrupt:
             pass
         finally:
+            self.vad.stop()
             self.running = False
             sys.stdout.write("\033[?25h\n")
             sys.stdout.flush()
