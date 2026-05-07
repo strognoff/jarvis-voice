@@ -727,9 +727,15 @@ class JarvisTUI:
             self._resume_vad()
 
     def answer_question(self, question: str) -> str:
+        SCREEN.update(status="Sending to OpenClaw...")
         response = send_message(SESSION_KEY, question)
         if response:
+            log(f"OpenClaw replied ({len(response)} chars)")
             return response
+
+        # OpenClaw not available — use local fallback
+        SCREEN.update(status="OpenClaw unavailable — using local fallback")
+        log("OpenClaw returned empty — using local fallback")
 
         text = question.lower().strip()
         if self.pending_intent == "weather_location":
