@@ -66,7 +66,16 @@ OPENCLAW_TIMEOUT     = int(_cfg(_CONF, "OPENCLAW_TIMEOUT", "90"))
 # Audio / recording
 SAMPLE_RATE       = 16000
 FRAME_DURATION_MS = 30
-ENERGY_THRESHOLD  = int(_cfg(_CONF, "ENERGY_THRESHOLD",  "800"))
+# ENERGY_THRESHOLD  — VAD wake sensitivity: how loud the room must be to trigger a
+#                     wake event. Set this high enough to ignore background noise.
+# STT_ENERGY_THRESHOLD — pre-Whisper silence gate: recordings below this RMS are
+#                     discarded as pure silence (no speech at all). Must be much
+#                     LOWER than ENERGY_THRESHOLD — speech that was loud enough to
+#                     wake the VAD may still measure below ENERGY_THRESHOLD when
+#                     averaged across the full 8s recording (quiet start/end pads).
+#                     True silence is RMS ~0-50; quiet speech is ~300-800.
+ENERGY_THRESHOLD      = int(_cfg(_CONF, "ENERGY_THRESHOLD",     "800"))
+STT_ENERGY_THRESHOLD  = int(_cfg(_CONF, "STT_ENERGY_THRESHOLD", "150"))
 RECORD_DURATION   = float(_cfg(_CONF, "RECORD_DURATION", "8.0"))
 MIC_DELAY         = float(_cfg(_CONF, "MIC_DELAY",       "1.0"))
 
@@ -371,6 +380,7 @@ def _log_system_info():
         "SESSION_KEY": SESSION_KEY,
         "REQUIRE_WAKE_WORD": str(REQUIRE_WAKE_WORD),
         "ENERGY_THRESHOLD": str(ENERGY_THRESHOLD),
+        "STT_ENERGY_THRESHOLD": str(STT_ENERGY_THRESHOLD),
         "RECORD_DURATION": str(RECORD_DURATION),
     }
     for k, v in info.items():
@@ -873,10 +883,12 @@ def _transcribe_wav(wav_path: str) -> str:
     Checks RMS energy first — if the recording is silent, returns ""
     immediately without running Whisper (saves ~8s and prevents false triggers).
     """
-    # Energy gate — skip Whisper entirely on silent recordings
+    # Energy gate — skip Whisper entirely on truly silent recordings.
+    # Uses STT_ENERGY_THRESHOLD (not ENERGY_THRESHOLD) — see config comment.
     rms = _wav_rms(wav_path)
-    if rms < ENERGY_THRESHOLD:
-        log(f"Recording silent (RMS={rms:.0f} < {ENERGY_THRESHOLD}) — skipping Whisper")
+    log(f"STT energy check: RMS={rms:.0f}  gate={STT_ENERGY_THRESHOLD}  vad_threshold={ENERGY_THRESHOLD}")
+    if rms < STT_ENERGY_THRESHOLD:
+        log(f"Recording silent (RMS={rms:.0f} < STT gate {STT_ENERGY_THRESHOLD}) — skipping Whisper")
         return ""
 
     model = _find_whisper_model()
