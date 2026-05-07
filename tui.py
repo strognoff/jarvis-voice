@@ -121,6 +121,160 @@ _STATE_META = {
 _DOTS = ["● ○ ○", "● ● ○", "● ● ●", "○ ○ ○"]
 _SPIN = list("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
 
+# ── Color palette (bot_avatar aesthetic) ────────────────────────────
+# Derived from images/bot_avatar.jpg:
+#   deep navy-black bg, silver metallic tones, electric blue glows, teal accents
+def _build_colors() -> dict:
+    """Return ANSI 24-bit true-color escape strings.
+
+    Falls back to empty strings when NO_COLOR env var is set or when the
+    terminal declares itself dumb (TERM=dumb).
+    """
+    no_color = bool(os.environ.get("NO_COLOR")) or os.environ.get("TERM") == "dumb"
+    if no_color:
+        return {k: "" for k in (
+            "border", "title", "label", "status_active", "status_dim",
+            "you_label", "you_text", "jarvis_label", "jarvis_text",
+            "footer", "face", "reset",
+        )}
+    def fg(r, g, b):
+        return f"\033[38;2;{r};{g};{b}m"
+    return {
+        "border":        fg(26,  99, 238),   # #1a63ee electric blue
+        "title":         fg(91, 170, 255),   # #5baaff bright sky-blue
+        "label":         fg(178, 183, 186),  # #b2b7ba silver-grey
+        "status_active": fg(43,  212, 160),  # #2bd4a0 teal glow
+        "status_dim":    fg(109, 169, 133),  # #6da985 muted teal
+        "you_label":     fg(238, 239, 243),  # #eeeff3 near-white
+        "you_text":      fg(200, 210, 230),  # soft white-blue
+        "jarvis_label":  fg(91,  170, 255),  # #5baaff
+        "jarvis_text":   fg(145, 208, 255),  # #91d0ff light blue
+        "footer":        fg(66,   90, 118),  # #425a76 dim blue-grey
+        "face":          fg(26,   99, 238),  # #1a63ee — face borders
+        "reset":         "\033[0m",
+    }
+
+_COLORS = _build_colors()
+
+def _c(name: str) -> str:
+    """Return the ANSI color escape for a palette key, or '' if colors disabled."""
+    return _COLORS.get(name, "")
+
+import re as _re
+_ANSI_ESCAPE = _re.compile(r"\033\[[^m]*m")
+
+def _visible_len(s: str) -> int:
+    """Length of string after stripping ANSI escape sequences."""
+    return len(_ANSI_ESCAPE.sub("", s))
+
+# ── Multi-frame animated robot face art ──────────────────────────────
+# dict[state] -> list of frames, each frame = list of 7 strings (17 chars each)
+# Accessed as: _FACE_FRAMES[state][frame % len(frames)][line_index]
+
+def _ff(eyes: str, mouth: str) -> list[str]:
+    """Build a 7-line face frame. eyes and mouth must each be exactly 7 visible chars."""
+    return [
+        "  ╔═══════════╗  ",
+        "  ║ ▓▓▓▓▓▓▓▓▓ ║  ",
+        f"  ║  {eyes}  ║  ",
+        "  ║  ▔▔▔▔▔▔▔  ║  ",
+        f"  ║  {mouth}  ║  ",
+        "  ║▄▄▄▄▄▄▄▄▄▄▄║  ",
+        "  ╚═══════════╝  ",
+    ]
+
+_FACE_FRAMES: dict[str, list[list[str]]] = {
+    # idle: slow blink every 8 frames — eyes open (6 frames) then closed (2 frames)
+    "idle": [
+        _ff("◈     ◈", "╾─────╼"),
+        _ff("◈     ◈", "╾─────╼"),
+        _ff("◈     ◈", "╾─────╼"),
+        _ff("◈     ◈", "╾─────╼"),
+        _ff("◈     ◈", "╾─────╼"),
+        _ff("◈     ◈", "╾─────╼"),
+        _ff("─     ─", "╾─────╼"),   # blink closed
+        _ff("◈     ◈", "╾─────╼"),
+    ],
+    # start: dots eyes, neutral mouth
+    "start": [
+        _ff("·     ·", "───────"),
+        _ff("·     ·", "───────"),
+        _ff("·     ·", "───────"),
+        _ff("·     ·", "───────"),
+    ],
+    # wake: eyes snap wide, pulse ◉ ↔ ◎
+    "wake": [
+        _ff("◉     ◉", "╾──●──╼"),
+        _ff("◎     ◎", "╾──●──╼"),
+        _ff("◉     ◉", "╾─────╼"),
+        _ff("◎     ◎", "╾──●──╼"),
+    ],
+    # listening: mouth dot bounces L→R→L across 5 interior positions
+    "listening": [
+        _ff("◉     ◉", "╾●────╼"),
+        _ff("◉     ◉", "╾─●───╼"),
+        _ff("◉     ◉", "╾──●──╼"),
+        _ff("◉     ◉", "╾───●─╼"),
+        _ff("◉     ◉", "╾────●╼"),
+        _ff("◉     ◉", "╾───●─╼"),
+        _ff("◉     ◉", "╾──●──╼"),
+        _ff("◉     ◉", "╾─●───╼"),
+    ],
+    # more: same as listening
+    "more": [
+        _ff("◉     ◉", "╾●────╼"),
+        _ff("◉     ◉", "╾─●───╼"),
+        _ff("◉     ◉", "╾──●──╼"),
+        _ff("◉     ◉", "╾───●─╼"),
+        _ff("◉     ◉", "╾────●╼"),
+        _ff("◉     ◉", "╾───●─╼"),
+        _ff("◉     ◉", "╾──●──╼"),
+        _ff("◉     ◉", "╾─●───╼"),
+    ],
+    # thinking: eyes rotate ◑◐ → ◐◑ → ◔◕ → ◕◔
+    "thinking": [
+        _ff("◑     ◐", "· · · ·"),
+        _ff("◐     ◑", "· · · ·"),
+        _ff("◔     ◕", "· · · ·"),
+        _ff("◕     ◔", "· · · ·"),
+        _ff("◑     ◐", "· · · ·"),
+        _ff("◐     ◑", "· · · ·"),
+        _ff("◔     ◕", "· · · ·"),
+        _ff("◕     ◔", "· · · ·"),
+    ],
+    # busy: same as thinking
+    "busy": [
+        _ff("◑     ◐", "· · · ·"),
+        _ff("◐     ◑", "· · · ·"),
+        _ff("◔     ◕", "· · · ·"),
+        _ff("◕     ◔", "· · · ·"),
+        _ff("◑     ◐", "· · · ·"),
+        _ff("◐     ◑", "· · · ·"),
+        _ff("◔     ◕", "· · · ·"),
+        _ff("◕     ◔", "· · · ·"),
+    ],
+    # speaking: ◆ dot traverses mouth bar left to right and back
+    "speaking": [
+        _ff("◈     ◈", "◄◆════►"),
+        _ff("◈     ◈", "◄═◆═══►"),
+        _ff("◈     ◈", "◄══◆══►"),
+        _ff("◈     ◈", "◄═══◆═►"),
+        _ff("◈     ◈", "◄════◆►"),
+        _ff("◈     ◈", "◄═══◆═►"),
+        _ff("◈     ◈", "◄══◆══►"),
+        _ff("◈     ◈", "◄═◆═══►"),
+    ],
+    # error: eyes flicker × ↔ ✕
+    "error": [
+        _ff("×     ×", "───────"),
+        _ff("✕     ✕", "───────"),
+        _ff("×     ×", "───────"),
+        _ff("✕     ✕", "───────"),
+    ],
+}
+# Fallback for any unknown state
+_FACE_FRAMES["__default__"] = _FACE_FRAMES["idle"]
+
 _LOG_BUF: list[str] = []
 _LOG_MAX = 50
 
@@ -170,78 +324,351 @@ class Screen:
         self.answer = ""
         self.frame = 0
         self._started = False
+        # ── Animation state ─────────────────────────────────────────
+        self._anim_state_frame = 0    # resets on every state change
+        self._prev_state = ""         # previous state (for transition effects)
+        self._target_q = ""           # full question text (typewriter target)
+        self._target_a = ""           # full answer text  (typewriter target)
+        self._displayed_q = ""        # currently shown question (typewriter buffer)
+        self._displayed_a = ""        # currently shown answer   (typewriter buffer)
+        self._typewriter_speed = 8    # chars revealed per tick
 
     def update(self, state=None, status=None, question=None, answer=None):
         with self.lock:
-            if state is not None:
+            if state is not None and state != self.state:
+                self._prev_state = self.state
+                self.state = state
+                self._anim_state_frame = 0
+            elif state is not None:
                 self.state = state
             if status is not None:
                 self.status = status
             if question is not None:
-                self.question = question
+                self._target_q = question
+                self._displayed_q = ""          # restart typewriter
             if answer is not None:
-                self.answer = answer
+                self._target_a = answer
+                self._displayed_a = ""          # restart typewriter
             self.draw_locked()
 
     def tick(self):
         with self.lock:
             self.frame += 1
+            self._anim_state_frame += 1
+            # Advance typewriter buffers
+            if self._displayed_q != self._target_q:
+                end = len(self._displayed_q) + self._typewriter_speed
+                self._displayed_q = self._target_q[:end]
+            if self._displayed_a != self._target_a:
+                end = len(self._displayed_a) + self._typewriter_speed
+                self._displayed_a = self._target_a[:end]
             self.draw_locked()
 
+    # ── Dimensions ──────────────────────────────────────────────────
     def _inner_width(self) -> int:
-        cols = shutil.get_terminal_size((50, 24)).columns
-        return min(max(cols - 4, 38), 76)
+        cols = shutil.get_terminal_size((60, 24)).columns
+        # Reserve space for face column (18 chars) + a comfortable text area
+        return min(max(cols - 4, 52), 72)
 
-    def _hline(self, left, fill, right, w):
-        return left + fill * (w + 2) + right
+    # ── Color helpers ───────────────────────────────────────────────
+    @staticmethod
+    def _c(name: str) -> str:
+        return _c(name)
 
-    def _row(self, content, w):
-        return "║ " + content[:w].ljust(w) + " ║"
+    def _B(self, s: str) -> str:
+        """Wrap a box-drawing string in border color + reset."""
+        return _c("border") + s + _c("reset")
 
-    def _blank(self, w):
+    # ── Box primitives ───────────────────────────────────────────────
+    def _hline(self, left: str, fill: str, right: str, w: int) -> str:
+        return self._B(left + fill * (w + 2) + right)
+
+    def _row(self, content: str, w: int, color: str = "") -> str:
+        """A single bordered row.  content is the *visible* text (no ANSI).
+        color optionally wraps the inner content in a color."""
+        inner = content[:w].ljust(w)
+        if color:
+            inner = color + inner + _c("reset")
+        return self._B("║") + " " + inner + " " + self._B("║")
+
+    def _colored_row(self, colored_content: str, visible_len: int, w: int) -> str:
+        """Like _row but content already contains ANSI escapes; visible_len is
+        its display width so we can pad correctly."""
+        padding = " " * max(0, w - visible_len)
+        return self._B("║") + " " + colored_content + padding + " " + self._B("║")
+
+    def _blank(self, w: int) -> str:
         return self._row("", w)
 
-    def _status_line(self, w):
+    # ── Animated face ────────────────────────────────────────────────
+    def _animated_face(self) -> list[str]:
+        """Return the current animation frame's face lines."""
+        frames = _FACE_FRAMES.get(self.state, _FACE_FRAMES["__default__"])
+        return frames[self.frame % len(frames)]
+
+    # ── Title glyph (heartbeat pulse) ───────────────────────────────
+    def _title_glyph(self) -> str:
+        """Cycle ◈ → ◇ → ◆ → ◈ for a heartbeat glow effect."""
+        glyphs = ["◈", "◇", "◆", "◇"]
+        return glyphs[self.frame % len(glyphs)]
+
+    # ── Border color pulse ───────────────────────────────────────────
+    def _border_color(self) -> str:
+        """Cycle through 3 blue shades for border glow pulse."""
+        no_color = bool(os.environ.get("NO_COLOR")) or os.environ.get("TERM") == "dumb"
+        if no_color:
+            return ""
+        # deep blue → electric blue → bright cyan → back
+        shades = [
+            "\033[38;2;20;70;180m",   # dim blue
+            "\033[38;2;26;99;238m",   # electric blue (normal)
+            "\033[38;2;60;140;255m",  # bright blue
+            "\033[38;2;26;99;238m",   # electric blue
+        ]
+        return shades[self.frame % len(shades)]
+
+    # ── Wake flash border color ──────────────────────────────────────
+    def _effective_border_color(self) -> str:
+        """On wake state within first 8 anim frames: flash cyan-white."""
+        no_color = bool(os.environ.get("NO_COLOR")) or os.environ.get("TERM") == "dumb"
+        if no_color:
+            return ""
+        if self.state == "wake" and self._anim_state_frame < 8:
+            flash = [
+                "\033[38;2;100;200;255m",
+                "\033[38;2;255;255;255m",
+                "\033[38;2;100;200;255m",
+                "\033[38;2;60;140;255m",
+            ]
+            return flash[self._anim_state_frame % len(flash)]
+        return self._border_color()
+
+    # ── Scan line border ─────────────────────────────────────────────
+    def _scan_line_border(self, w: int) -> str:
+        """Top border with a bright traveling ◈ character (HUD radar sweep)."""
+        no_color = bool(os.environ.get("NO_COLOR")) or os.environ.get("TERM") == "dumb"
+        bc = self._effective_border_color()
+        R = _c("reset")
+        fill = w + 2  # total inner chars including the 2 padding spaces
+
+        if no_color:
+            return bc + "╔" + "═" * fill + "╗" + R
+
+        # Scan dot travels across fill positions every 60 frames (ping-pong)
+        period = 60
+        pos = (self.frame * 2) % (fill * 2)   # ping-pong
+        if pos >= fill:
+            pos = fill * 2 - 1 - pos
+        pos = max(0, min(fill - 1, pos))
+
+        chars = ["═"] * fill
+        chars[pos] = "◈"
+
+        bright = "\033[38;2;150;220;255m"
+        line = ""
+        for i, ch in enumerate(chars):
+            if i == pos:
+                line += R + bright + ch + R + bc
+            else:
+                line += ch
+
+        return bc + "╔" + line + "╗" + R
+
+    # ── Waveform visualizer (listening / speaking) ────────────────────
+    def _waveform(self, width: int) -> str:
+        """Animated ASCII waveform bar — purely cosmetic, driven by frame."""
+        import math
+        wave_chars = " ▁▂▃▄▅▆▇█"
+        result = []
+        for i in range(width):
+            # Multiple overlapping sine waves for organic feel
+            t = self.frame * 0.4 + i * 0.6
+            v = (math.sin(t) * 0.5 +
+                 math.sin(t * 1.7 + 1.2) * 0.3 +
+                 math.sin(t * 2.9 + 0.7) * 0.2)
+            v = (v + 1.0) / 2.0  # normalize to 0..1
+            idx = int(v * (len(wave_chars) - 1))
+            result.append(wave_chars[idx])
+        return "".join(result)
+
+    # ── Thinking particle trail ───────────────────────────────────────
+    def _thinking_trail(self, width: int) -> str:
+        """Scrolling bright dot across a field of dim dots."""
+        trail = list("· " * ((width // 2) + 1))
+        trail = trail[:width]
+        # Bright dot position: travels across width over 20 frames
+        pos = (self.frame * 2) % (width * 2)
+        if pos >= width:
+            pos = width * 2 - 1 - pos
+        pos = max(0, min(width - 1, pos))
+        trail[pos] = "●"
+        return "".join(trail)[:width]
+
+    # ── Idle particle field ──────────────────────────────────────────
+    def _particle_row(self, width: int, row_seed: int) -> str:
+        """Sparse drifting particles for idle screensaver feel."""
+        import math
+        result = []
+        for i in range(width):
+            # Each cell has a unique phase
+            phase = (self.frame + row_seed * 7 + i * 13) % 20
+            if phase == 0:
+                result.append("✦")
+            elif phase == 5:
+                result.append("◦")
+            elif phase == 10:
+                result.append("·")
+            else:
+                result.append(" ")
+        return "".join(result)[:width]
+
+    # ── Speaking sound wave ──────────────────────────────────────────
+    def _sound_wave(self, width: int) -> str:
+        """Shifting block-character wave for speaking state."""
+        wave = "▁▂▃▄▅▆▇█▇▆▅▄▃▂▁▁"
+        offset = self.frame % len(wave)
+        result = []
+        for i in range(width):
+            result.append(wave[(i + offset) % len(wave)])
+        return "".join(result)[:width]
+
+    # ── Status ──────────────────────────────────────────────────────
+    def _status_text(self) -> str:
+        """Build the animated status string (no borders)."""
         state = self.state
         emoji, label = _STATE_META.get(state, ("🤖", ""))
         text = self.status if self.status else label
         if state in ("listening", "more"):
             dots = _DOTS[self.frame % len(_DOTS)]
-            s = f"{emoji}  {text}  {dots}"
-        elif state == "thinking":
+            return f"{emoji}  {text}  {dots}"
+        elif state in ("thinking", "busy"):
             spin = _SPIN[self.frame % len(_SPIN)]
-            s = f"{emoji}  {text}  {spin}"
+            return f"{emoji}  {text}  {spin}"
         else:
-            s = f"{emoji}  {text}" if text else emoji
-        return self._row(s, w)
+            return f"{emoji}  {text}" if text else emoji
 
+    # ── Full redraw ──────────────────────────────────────────────────
     def draw_locked(self):
         w = self._inner_width()
-        top = self._hline("╔", "═", "╗", w)
-        mid = self._hline("╠", "═", "╣", w)
-        bot = self._hline("╚", "═", "╝", w)
+        R = _c("reset")
+        bc = self._effective_border_color()   # pulsing/flashing border color
 
-        title_row = self._row(f"  JARVIS  v{__version__}", w)
-        status_row = self._status_line(w)
+        def B(s: str) -> str:
+            return bc + s + R
 
-        q_lines = _wrap(self.question, w - 2) if self.question else ["—"]
-        a_lines = _wrap(self.answer, w - 2) if self.answer else ["—"]
+        # ── Box lines ───────────���────────────────────────────────────
+        top = self._scan_line_border(w)            # animated scan line top border
+        mid = B("╠" + "═" * (w + 2) + "╣")
+        bot = B("╚" + "═" * (w + 2) + "╝")
 
-        footer_row = self._row("  speak to wake  ·  Ctrl+C to quit", w)
+        def crow(colored_content: str, vis: int) -> str:
+            pad = " " * max(0, w - vis)
+            return B("║") + " " + colored_content + pad + " " + B("║")
 
+        def plain_row(text: str, color: str = "") -> str:
+            inner = text[:w].ljust(w)
+            if color:
+                inner = color + inner + R
+            return B("║") + " " + inner + " " + B("║")
+
+        def blank() -> str:
+            return plain_row("")
+
+        # ── Title bar — pulsing glyph + color ────────────────────────
+        g = self._title_glyph()
+        title_str = f"  {g}  J A R V I S  {g}   v{__version__}"
+        tc = _c("title")
+        title_row = crow(tc + title_str + R, len(title_str))
+
+        # ── Animated face block + right-side status visuals ──────────
+        FACE_W = 17
+        face_lines = self._animated_face()
+        rw = w - FACE_W - 2          # right-column width
+
+        # State-dependent status color
+        active_states = {"listening", "more", "thinking", "busy", "wake", "speaking"}
+        s_color = _c("status_active") if self.state in active_states else _c("status_dim")
+
+        # Right-side content per row (7 rows = face height).
+        # Each entry must be exactly rw visible chars wide (pre-padded), then ANSI-wrapped.
+        def _rcell(text: str, color: str) -> str:
+            """Pad text to exactly rw visible chars, then wrap in color."""
+            padded = text[:rw].ljust(rw)
+            return color + padded + R if color else padded
+
+        status_text = self._status_text()
+        blank_rc = " " * rw
+
+        right_col = [blank_rc] * 7
+
+        # Row 2: status text (animated)
+        right_col[2] = _rcell(status_text, s_color)
+
+        # Rows 3-4: state-specific visualizer (functions already return exactly rw chars)
+        if self.state in ("listening", "more"):
+            right_col[3] = _rcell(self._waveform(rw), _c("status_active"))
+            right_col[4] = _rcell(self._waveform(rw), _c("status_dim"))
+        elif self.state in ("thinking", "busy"):
+            right_col[3] = _rcell(self._thinking_trail(rw), _c("status_active"))
+            right_col[4] = _rcell(self._thinking_trail(rw), _c("status_dim"))
+        elif self.state == "speaking":
+            right_col[3] = _rcell(self._sound_wave(rw), _c("status_active"))
+            right_col[4] = _rcell(self._sound_wave(rw), _c("status_dim"))
+        elif self.state == "idle":
+            right_col[3] = _rcell(self._particle_row(rw, 0), _c("status_dim"))
+            right_col[4] = _rcell(self._particle_row(rw, 3), _c("status_dim"))
+        elif self.state == "wake":
+            right_col[3] = _rcell(self._waveform(rw), _c("status_active"))
+            right_col[4] = _rcell(self._thinking_trail(rw), _c("status_active"))
+
+        # Row 5: secondary status label (non-active states only)
+        if self.status and self.state not in ("listening", "more", "thinking", "busy", "speaking", "wake"):
+            right_col[5] = _rcell(self.status, _c("label"))
+
+        face_status_rows = []
+        for i, face_line in enumerate(face_lines):
+            # face_line is exactly 17 visible chars; right_col[i] is exactly rw visible chars
+            fp = _c("face") + face_line + R
+            rc = right_col[i]               # exactly rw visible chars (may have ANSI codes)
+            combined = fp + "  " + rc       # ANSI-wrapped; visible = 17 + 2 + rw = FACE_W+2+rw
+            face_status_rows.append(crow(combined, FACE_W + 2 + rw))
+
+        # ── You / question section (typewriter) ──────────────────────
+        q_text = self._displayed_q or self._target_q
+        q_lines = _wrap(q_text, w - 4) if q_text else ["—"]
+        you_label_row = crow(_c("you_label") + "  ◂ You" + R, 6)
+        you_rows = [
+            crow(_c("you_text") + "    " + l + R, 4 + len(l))
+            for l in q_lines
+        ]
+
+        # ── Jarvis / answer section (typewriter) ─────────────────────
+        a_text = self._displayed_a or self._target_a
+        a_lines = _wrap(a_text, w - 4) if a_text else ["—"]
+        jarvis_label_row = crow(_c("jarvis_label") + "  ◈ Jarvis" + R, 9)
+        jarvis_rows = [
+            crow(_c("jarvis_text") + "    " + l + R, 4 + len(l))
+            for l in a_lines
+        ]
+
+        # ── Footer ───────────────────────────────────────────────────
+        footer_str = "  speak to wake  ·  Ctrl+C to quit"
+        footer_row = crow(_c("footer") + footer_str + R, len(footer_str))
+
+        # ── Assemble ─────────────────────────────────────────────────
         out = [
             top,
             title_row,
             mid,
-            self._blank(w),
-            status_row,
-            self._blank(w),
+            blank(),
+            *face_status_rows,
+            blank(),
             mid,
-            self._row("  You", w),
-            *[self._row("  " + l, w) for l in q_lines],
+            you_label_row,
+            *you_rows,
             mid,
-            self._row("  Jarvis", w),
-            *[self._row("  " + l, w) for l in a_lines],
+            jarvis_label_row,
+            *jarvis_rows,
             mid,
             footer_row,
             bot,
@@ -454,18 +881,63 @@ def _record_wav(wav_path: str, duration: float) -> bool:
         return False
 
 
+def _wait_for_silence(max_wait: float = 5.0):
+    """Wait until room audio drops below ENERGY_THRESHOLD after TTS.
+
+    Records short 0.5s probe chunks and waits until the RMS energy falls
+    below threshold — handles speaker bleed/reverb adaptively regardless of
+    volume. Gives up after max_wait seconds.
+    """
+    import tempfile
+    probe = str(Path(tempfile.gettempdir()) / "jarvis_probe.wav")
+    PROBE_DURATION = 0.5
+    TAIL_BUFFER    = 0.3   # extra quiet time after silence detected
+    deadline = time.time() + max_wait
+
+    SCREEN.update(status="Waiting for speaker to finish...")
+
+    while time.time() < deadline:
+        _record_wav(probe, PROBE_DURATION)
+        rms = _wav_rms(probe)
+        log(f"[silence probe] RMS={rms:.0f} threshold={ENERGY_THRESHOLD}")
+        if rms < ENERGY_THRESHOLD:
+            time.sleep(TAIL_BUFFER)  # let the last reverb die out
+            return
+        # Still noisy — wait a moment before probing again
+        time.sleep(0.1)
+
+    log("_wait_for_silence: gave up waiting — proceeding anyway")
+
+
 def _countdown_bar(duration: float, stop_event: threading.Event):
-    """Animate a countdown bar in the status line while recording.
+    """Animate a smooth countdown bar using sub-character block precision.
     Runs in a background thread — stops when stop_event is set."""
-    bar_width = 12  # characters wide
+    bar_width = 14  # characters wide
     start = time.time()
+    # Block chars from full to empty: █▉▊▋▌▍▎▏
+    BLOCKS = "█▉▊▋▌▍▎▏ "
     while not stop_event.is_set():
         elapsed = time.time() - start
         remaining = max(0.0, duration - elapsed)
-        filled = int(bar_width * remaining / duration)
-        bar = "█" * filled + "░" * (bar_width - filled)
-        SCREEN.update(status=f"🎙 [{bar}] {remaining:.0f}s")
-        time.sleep(0.25)
+        ratio = remaining / duration   # 1.0 → 0.0
+
+        # Full blocks
+        full = ratio * bar_width
+        n_full = int(full)
+        frac = full - n_full   # fractional part → pick sub-block char
+
+        if frac > 0:
+            sub_idx = int((1.0 - frac) * (len(BLOCKS) - 1))
+            sub_char = BLOCKS[sub_idx]
+        else:
+            sub_char = ""
+
+        bar = "█" * n_full + sub_char
+        bar = bar.ljust(bar_width)[:bar_width]
+
+        secs = int(remaining) + 1
+        SCREEN.update(status=f"🎙 [{bar}] {secs}s")
+        time.sleep(0.12)   # ~8fps for smooth sub-block animation
 
 
 def listen(timeout: float = QUESTION_TIMEOUT) -> str:
@@ -475,9 +947,9 @@ def listen(timeout: float = QUESTION_TIMEOUT) -> str:
     wav = str(Path(tempfile.gettempdir()) / "jarvis_listen.wav")
     duration = min(timeout, RECORD_DURATION)
 
-    # Wait for "Yes?" TTS to finish before opening the mic, otherwise the
-    # first word captures Jarvis's own voice instead of the user's question.
-    time.sleep(MIC_DELAY)
+    # Wait until the room goes quiet after TTS — adaptively handles speaker
+    # bleed and reverb regardless of volume or response length.
+    _wait_for_silence(max_wait=MIC_DELAY + 4.0)
 
     # Start countdown animation in background
     stop_countdown = threading.Event()
