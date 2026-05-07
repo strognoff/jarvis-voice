@@ -6,7 +6,8 @@
 #   bash test_stt.sh 8          # records 8 seconds
 
 DURATION=${1:-5}
-WAV=/tmp/jarvis_stt_test.wav
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+WAV="$SCRIPT_DIR/jarvis_stt_test.wav"
 MODEL=/data/data/com.termux/files/home/whisper.cpp/models/ggml-medium.en.bin
 
 echo ""
