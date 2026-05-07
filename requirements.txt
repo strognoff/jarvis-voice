@@ -1,14 +1,14 @@
 # Jarvis Voice TUI — Python dependencies
 # Install: pip install -r requirements.txt
 
+# Speech-to-Text — local Whisper (no API key, runs on-device)
+# Install torch first from the bundled wheels if on ARM:
+#   pip install torch.whl torchaudio.whl
+#   pip install faster-whisper
+faster-whisper>=1.0.0
+
 # Voice Activity Detection (VAD) - local, no API key needed
-# We patch webrtcvad to remove pkg_resources dependency (fixed automatically on install)
 webrtcvad>=2.0.10
 
-# OpenClaw gateway calls use Python's standard library HTTP client.
-
-# ──────────────────────────────────────────────────────────────────────
-# Optional / advanced VAD (requires torch — compatibility varies):
-#   pip install torch torchaudio silero-vad
-# silero-vad gives better quality than WebRTC VAD but needs PyTorch
-# ──────────────────────────────────────────────────────────────────────
+# HTTP client (for OpenClaw gateway API calls)
+requests>=2.31.0

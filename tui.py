@@ -271,6 +271,89 @@ def wait_for_tts(text: str):
 
 # ── STT ─────────────────────────────────────────────────────────────
 
+# Whisper model — loaded once, reused for every transcription
+_whisper_model = None
+
+def _get_whisper_model():
+    global _whisper_model
+    if _whisper_model is not None:
+        return _whisper_model
+    try:
+        from faster_whisper import WhisperModel
+        SCREEN.update(status="Loading Whisper model...")
+        # tiny — fast on CPU, good enough for short commands
+        _whisper_model = WhisperModel("tiny", device="cpu", compute_type="int8")
+        log("Whisper tiny model loaded")
+        return _whisper_model
+    except ImportError:
+        log("faster-whisper not installed — pip install faster-whisper")
+        return None
+    except Exception as e:
+        log(f"Whisper load error: {e}")
+        return None
+
+def _transcribe_wav(wav_path: str) -> str:
+    """Transcribe a WAV file with faster-whisper."""
+    model = _get_whisper_model()
+    if model is None:
+        return _termux_stt_fallback()
+    try:
+        segments, _ = model.transcribe(
+            wav_path,
+            language="en",
+            beam_size=3,
+            vad_filter=True,           # skip silence segments
+            vad_parameters={"min_silence_duration_ms": 500},
+        )
+        text = " ".join(seg.text.strip() for seg in segments).strip()
+        # Strip hallucinated filler Whisper produces on silence
+        if text.lower() in ("", "you", "thank you", "thanks", ".", "...", "bye"):
+            return ""
+        return text
+    except Exception as e:
+        log(f"Whisper transcribe error: {e}")
+        return ""
+
+def _termux_stt_fallback() -> str:
+    """Fallback to termux-speech-to-text if Whisper is unavailable."""
+    try:
+        result = subprocess.run(
+            ["termux-speech-to-text"],
+            capture_output=True, text=True, timeout=15,
+        )
+        return result.stdout.strip()
+    except Exception:
+        return ""
+
+def _record_wav(wav_path: str, duration: float) -> bool:
+    """Record audio for `duration` seconds. Returns True if file has content."""
+    if Path(wav_path).exists():
+        try:
+            Path(wav_path).unlink()
+        except Exception:
+            pass
+    try:
+        proc = subprocess.Popen(
+            ["termux-microphone-record", "-f", wav_path],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        time.sleep(duration)
+        subprocess.run(
+            ["termux-microphone-record", "-q"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=3,
+        )
+        try:
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            proc.terminate()
+    except Exception as e:
+        log(f"record error: {e}")
+        return False
+    p = Path(wav_path)
+    return p.exists() and p.stat().st_size > 512
+
 _INCOMPLETE_ENDINGS = {
     "a", "an", "the",
     "in", "on", "at", "to", "of", "for", "from", "with", "by", "about",
@@ -288,33 +371,22 @@ def _is_incomplete(text: str) -> bool:
     last_word = text.rstrip(".,!?").split()[-1].lower()
     return last_word in _INCOMPLETE_ENDINGS
 
-def best_transcript(lines):
-    if not lines:
-        return ""
-    last = lines[-1]
-    longest = max(lines, key=lambda l: (len(l.split()), len(l)))
-    if len(last.split()) < len(longest.split()) // 2:
-        return longest
-    return last
-
 def merge_transcripts(parts):
     merged = ""
     for part in (p.strip() for p in parts if p and p.strip()):
         if not merged:
             merged = part
             continue
-        lower_merged = merged.lower()
-        lower_part = part.lower()
-        if lower_part in lower_merged:
+        lm, lp = merged.lower(), part.lower()
+        if lp in lm:
             continue
-        if lower_merged in lower_part:
+        if lm in lp:
             merged = part
             continue
-        merged_words = lower_merged.split()
-        part_words = lower_part.split()
+        mw, pw = lm.split(), lp.split()
         overlap = 0
-        for n in range(min(len(merged_words), len(part_words), 4), 0, -1):
-            if merged_words[-n:] == part_words[:n]:
+        for n in range(min(len(mw), len(pw), 4), 0, -1):
+            if mw[-n:] == pw[:n]:
                 overlap = n
                 break
         new_words = part.split()[overlap:]
@@ -322,70 +394,48 @@ def merge_transcripts(parts):
             merged = merged + " " + " ".join(new_words)
     return merged.strip()
 
-def _parse_stt_output(stdout: str) -> str:
-    lines = [l.strip() for l in stdout.splitlines() if l.strip()]
-    if not lines:
-        return ""
-    if len(lines) == 1:
-        return lines[0]
-    last_lower = lines[-1].lower()
-    if all(l.lower() in last_lower for l in lines[:-1]):
-        return lines[-1]
-    return merge_transcripts(lines)
-
-def start_stt_process() -> subprocess.Popen:
-    return subprocess.Popen(
-        ["termux-speech-to-text"],
-        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
-    )
-
-def collect_stt_process(proc: subprocess.Popen, timeout: float) -> str:
-    parts = []
-    current_proc = proc
-    current_timeout = timeout
-
-    for attempt in range(STT_MAX_PARTS):
-        try:
-            stdout, _ = current_proc.communicate(timeout=current_timeout)
-            result = _parse_stt_output(stdout)
-        except subprocess.TimeoutExpired:
-            current_proc.kill()
-            current_proc.communicate()
-            break
-        except Exception as e:
-            log(f"STT error: {e}")
-            break
-
-        if not result:
-            break
-
-        next_proc = start_stt_process() if attempt + 1 < STT_MAX_PARTS else None
-
-        parts.append(result)
-        merged = merge_transcripts(parts)
-
-        if not _is_incomplete(merged):
-            if next_proc:
-                next_proc.kill()
-                try:
-                    next_proc.communicate()
-                except Exception:
-                    pass
-            return merged
-
-        SCREEN.update(status="Listening for more...")
-        if next_proc is None:
-            return merged
-        current_proc = next_proc
-        current_timeout = STT_CONTINUATION_TIMEOUT
-
-    return merge_transcripts(parts) if parts else ""
-
 def listen(timeout: float = QUESTION_TIMEOUT) -> str:
-    proc = start_stt_process()
-    return collect_stt_process(proc, timeout)
+    """Record audio then transcribe with Whisper.
+
+    Records for up to `timeout` seconds, but uses a 6s chunk approach:
+    records 6s, transcribes, and if incomplete chains another 6s chunk.
+    This gives natural sentence completion without waiting the full timeout.
+    """
+    import tempfile
+    wav = str(Path(tempfile.gettempdir()) / "jarvis_listen.wav")
+
+    # Record the first chunk (capped at timeout, max 8s for a natural utterance)
+    record_secs = min(timeout, 8.0)
+    SCREEN.update(status="Recording...")
+    ok = _record_wav(wav, record_secs)
+    if not ok:
+        return ""
+
+    SCREEN.update(status="Transcribing...")
+    text = _transcribe_wav(wav)
+    if not text:
+        return ""
+
+    # Chain a continuation if the sentence ended on a dangling word
+    if _is_incomplete(text) and timeout > record_secs:
+        SCREEN.update(status="Listening for more...")
+        wav2 = str(Path(tempfile.gettempdir()) / "jarvis_listen2.wav")
+        ok2 = _record_wav(wav2, min(6.0, timeout - record_secs))
+        if ok2:
+            extra = _transcribe_wav(wav2)
+            if extra:
+                text = merge_transcripts([text, extra])
+
+    return text
 
 def listen_long(timeout: float = QUESTION_TIMEOUT) -> str:
+    return listen(timeout)
+
+# Stub for compatibility — no longer used but kept so nothing breaks
+def start_stt_process():
+    return None
+
+def collect_stt_process(proc, timeout: float) -> str:
     return listen(timeout)
 
 # ── Wake word ────────────────────────────────────────────────────────
@@ -741,6 +791,9 @@ class JarvisTUI:
             sys.exit(1)
 
         log(f"Gateway: {GATEWAY_URL}  Session: {SESSION_KEY}")
+
+        # Warm up Whisper model in background so it's ready for the first question
+        threading.Thread(target=_get_whisper_model, daemon=True).start()
 
         self.running = True
         self.vad = VADLoop()
