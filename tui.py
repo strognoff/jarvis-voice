@@ -76,25 +76,37 @@ def compute_rms(audio_bytes: bytes) -> float:
         total += s * s
     return (total / n) ** 0.5
 
-# ── Face Emojis ─────────────────────────────────────────────────────
-FACES = {
-    "idle":      ["🤖", "🙂", "🤖", "😴"],
-    "wake":      ["👀", "🤖", "👂"],
-    "listening": ["🎤", "👂", "🎙️"],
-    "thinking":  ["🤔", "🧠", "💭"],
-    "speaking":  ["🔊", "🗣️", "😊"],
-    "happy":     ["😊", "😄", "🙂"],
-    "done":      ["✅", "🙂"],
-    "error":     ["❌", "😕"],
+# ── TUI ─────────────────────────────────────────────────────────────
+
+# Per-state: (emoji, label)
+_STATE_META = {
+    "idle":      ("😴", "Waiting..."),
+    "busy":      ("🤖", ""),
+    "wake":      ("👀", "Wake detected!"),
+    "listening": ("🎤", "Listening"),
+    "more":      ("🎤", "Listening for more"),
+    "thinking":  ("🧠", "Thinking"),
+    "speaking":  ("🔊", "Speaking"),
+    "error":     ("❌", ""),
 }
 
-def log(msg):
-    print(f"[jarvis-tui] {msg}", flush=True)
+_DOTS   = ["● ○ ○", "● ● ○", "● ● ●", "○ ○ ○"]
+_SPIN   = list("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
+
+# In-memory log ring buffer — log() writes here, never to stdout
+_LOG_BUF: list[str] = []
+_LOG_MAX = 50
+
+def log(msg: str):
+    """Append to in-memory ring buffer; never print to stdout."""
+    entry = f"[{time.strftime('%H:%M:%S')}] {msg}"
+    _LOG_BUF.append(entry)
+    if len(_LOG_BUF) > _LOG_MAX:
+        _LOG_BUF.pop(0)
 
 def log_exception(context: str, exc: BaseException):
     trace = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
     log(f"{context}: {type(exc).__name__}: {exc}")
-    log(trace)
     try:
         with open(APP_DIR / "jarvis_error.log", "a") as f:
             f.write(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] {context}\n")
@@ -103,17 +115,33 @@ def log_exception(context: str, exc: BaseException):
         pass
 
 def print_banner():
-    print()
-    print(f"  ╔══════════════════════════════════════╗  v{__version__}")
-    print("  ║       🤖 JARVIS VOICE TUI 🤖         ║")
-    print("  ╚══════════════════════════════════════╝")
-    print()
+    pass  # Banner is now part of the live TUI box; nothing to print on startup.
+
+def _wrap(text: str, width: int, max_lines: int = 2) -> list[str]:
+    """Word-wrap text into at most max_lines of the given width."""
+    words = text.split()
+    lines, current = [], ""
+    for word in words:
+        if not current:
+            current = word
+        elif len(current) + 1 + len(word) <= width:
+            current += " " + word
+        else:
+            lines.append(current)
+            if len(lines) >= max_lines:
+                # Truncate last line with ellipsis
+                lines[-1] = lines[-1][: width - 1] + "…"
+                return lines
+            current = word
+    if current:
+        lines.append(current)
+    return lines or [""]
 
 class Screen:
     def __init__(self):
         self.lock = threading.Lock()
         self.state = "idle"
-        self.status = "Starting..."
+        self.status = ""
         self.question = ""
         self.answer = ""
         self.frame = 0
@@ -136,36 +164,105 @@ class Screen:
             self.frame += 1
             self.draw_locked()
 
+    # ── Internal helpers ──────────────────────────────────────────
+
+    def _inner_width(self) -> int:
+        cols = shutil.get_terminal_size((50, 24)).columns
+        return min(max(cols - 4, 38), 76)  # 4 = 2 border + 2 padding each side
+
+    def _hline(self, left: str, fill: str, right: str, w: int) -> str:
+        return left + fill * (w + 2) + right
+
+    def _row(self, content: str, w: int) -> str:
+        """Pad content to exactly w chars, wrapped in border."""
+        cell = content[:w].ljust(w)
+        return f"║ {cell} ║"
+
+    def _blank(self, w: int) -> str:
+        return self._row("", w)
+
+    def _status_line(self, w: int) -> str:
+        state = self.state
+        emoji, label = _STATE_META.get(state, ("🤖", ""))
+        # Override label with explicit status if set
+        text = self.status if self.status else label
+
+        if state in ("listening", "more"):
+            dots = _DOTS[self.frame % len(_DOTS)]
+            status_str = f"{emoji}  {text}  {dots}"
+        elif state == "thinking":
+            spinner = _SPIN[self.frame % len(_SPIN)]
+            status_str = f"{emoji}  {text}  {spinner}"
+        else:
+            status_str = f"{emoji}  {text}" if text else f"{emoji}"
+
+        return self._row(status_str, w)
+
     def draw_locked(self):
-        faces = FACES.get(self.state, FACES["idle"])
-        emoji = faces[self.frame % len(faces)]
+        w = self._inner_width()
+        iw = w  # text inner width (inside the 1-char padding on each side)
+
+        top    = self._hline("╔", "═", "╗", w)
+        mid    = self._hline("╠", "═", "╣", w)
+        bot    = self._hline("╚", "═", "╝", w)
+
+        # Title row — keep it short so emoji width doesn't clip the version
+        title_row = self._row(f"  JARVIS  v{__version__}", w)
+
+        # Status / animation row
+        status_row = self._status_line(w)
+
+        # You block
+        q_text = self.question or ""
+        q_lines = _wrap(q_text, iw - 2) if q_text else ["—"]
+        you_label = self._row("  You", w)
+        you_rows  = [self._row("  " + l, w) for l in q_lines]
+
+        # Jarvis block
+        a_text = self.answer or ""
+        a_lines = _wrap(a_text, iw - 2) if a_text else ["—"]
+        jar_label = self._row("  Jarvis", w)
+        jar_rows  = [self._row("  " + l, w) for l in a_lines]
+
+        # Footer — inside the box, above the bottom border
+        wake_hint = f"wake: \"{WAKE_WORD}\"" if REQUIRE_WAKE_WORD else "always listening"
+        footer_row = self._row(f"  {wake_hint}  ·  Ctrl+C to quit", w)
+
+        # Assemble — fixed structure, always same number of lines
+        out = [
+            top,
+            title_row,
+            mid,
+            self._blank(w),
+            status_row,
+            self._blank(w),
+            mid,
+            you_label,
+            *you_rows,
+            mid,
+            jar_label,
+            *jar_rows,
+            mid,
+            footer_row,
+            bot,
+            "",  # trailing newline guard
+        ]
+
+        # Move to top of screen; clear screen only on first draw
         if not self._started:
-            print("\033[2J\033[H", end="")
+            sys.stdout.write("\033[2J\033[H\033[?25l")  # clear + hide cursor
             self._started = True
         else:
-            print("\033[H", end="")
+            sys.stdout.write("\033[H")
 
-        question = self.question or "(waiting)"
-        answer = self.answer or "(waiting)"
-        lines = [
-            f"  JARVIS VOICE TUI  v{__version__}",
-            "  " + "=" * 38,
-            f"  {emoji}  {self.status[:34]:34}",
-            "",
-            f"  You:    {question[:64]}",
-            f"  Jarvis: {answer[:64]}",
-            "",
-            f"  Wake phrase: \"{WAKE_WORD}\"",
-            "  Press Ctrl+C to stop.",
-            " " * 78,
-        ]
-        print("\n".join(lines), end="\n", flush=True)
+        sys.stdout.write("\n".join(out))
+        sys.stdout.flush()
 
 
 SCREEN = Screen()
 
 
-def render(face, status=""):
+def render(face: str, status: str = ""):
     SCREEN.update(state=face, status=status)
 
 def speech_text(text: str) -> str:
@@ -213,47 +310,126 @@ def best_transcript(lines):
         return longest
     return last
 
-def listen(timeout: float = QUESTION_TIMEOUT) -> str:
-    """Use termux-speech-to-text to capture and transcribe speech.
+def _parse_stt_output(stdout: str) -> str:
+    """Parse raw termux-speech-to-text stdout into a clean transcript.
 
-    Android STT can output lines in two modes:
-      - Cumulative: each line grows ("where is" → "where is Tring")
-        → last line is the complete result
-      - Non-cumulative: each line is a fresh partial for the last phrase
-        ("where is" / "Tring")
-        → all lines must be merged to reconstruct the full sentence
-
-    We detect which mode by checking whether the last line is a superset of
-    the others.  If it is, return it directly.  If not, merge all lines.
+    Android STT streams partial results line-by-line.  Two modes exist:
+      - Cumulative: lines grow ("where is" → "where is Tring") → last line wins
+      - Non-cumulative: independent partials ("where is" / "Tring") → merge all
     """
-    try:
-        result = subprocess.run(
-            ["termux-speech-to-text"],
-            capture_output=True, text=True, timeout=timeout
-        )
-        lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-        if not lines:
-            return ""
-
-        if len(lines) == 1:
-            return lines[0]
-
-        SCREEN.update(status=f"STT: {len(lines)} partials")
-
-        # Check if last line already contains all earlier content (cumulative mode)
-        last_lower = lines[-1].lower()
-        all_contained = all(l.lower() in last_lower for l in lines[:-1])
-        if all_contained:
-            # Cumulative mode — last line is the complete transcript
-            return lines[-1]
-
-        # Non-cumulative mode — merge all partial lines into one sentence
-        return merge_transcripts(lines)
-    except subprocess.TimeoutExpired:
+    lines = [l.strip() for l in stdout.splitlines() if l.strip()]
+    if not lines:
         return ""
-    except Exception as e:
-        log(f"STT error: {e}")
-        return ""
+    if len(lines) == 1:
+        return lines[0]
+
+    # Detect cumulative mode: last line already contains all earlier lines
+    last_lower = lines[-1].lower()
+    if all(l.lower() in last_lower for l in lines[:-1]):
+        return lines[-1]
+
+    # Non-cumulative mode: merge all partials into one sentence
+    return merge_transcripts(lines)
+
+
+# Words that cannot grammatically end a sentence — if the transcript ends with
+# one of these, Android cut off mid-utterance and we must fire a continuation.
+_INCOMPLETE_ENDINGS = {
+    # Articles — cannot end a sentence
+    "a", "an", "the",
+    # Prepositions — cannot end a meaningful sentence on their own
+    "in", "on", "at", "to", "of", "for", "from", "with", "by", "about",
+    "into", "onto", "upon", "within", "without", "between", "among",
+    "near", "over", "under", "through", "across", "along", "beside",
+    # Coordinating conjunctions mid-thought
+    "and", "or", "but", "nor",
+    # Possessive determiners — always precede a noun
+    "my", "your", "his", "her", "its", "our", "their",
+    # Demonstrative determiners before a noun
+    "this", "that", "these", "those",
+    # Open question words that need an object
+    "what", "where", "when", "why", "how", "which", "who", "whose",
+}
+
+def _is_incomplete(text: str) -> bool:
+    """Return True if the transcript ends with a word that cannot end a sentence."""
+    if not text:
+        return False
+    last_word = text.rstrip(".,!?").split()[-1].lower()
+    return last_word in _INCOMPLETE_ENDINGS
+
+
+def start_stt_process() -> subprocess.Popen:
+    """Launch termux-speech-to-text in the background so it is already
+    capturing audio before the user starts speaking.  Call collect_stt_process()
+    to read the result."""
+    return subprocess.Popen(
+        ["termux-speech-to-text"],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+    )
+
+
+def collect_stt_process(proc: subprocess.Popen, timeout: float) -> str:
+    """Wait for a pre-rolled STT process and return the merged transcript.
+
+    Strategy: always launch the *next* STT process the instant the current one
+    finishes — before we even check whether the result is complete.  This way
+    the continuation is already capturing audio during the tiny gap where the
+    user speaks the trailing word ("Tring") before we know we need it.
+
+    If the result turns out to be complete we simply kill the pre-rolled
+    continuation and return.  If it's incomplete we collect it instead.
+    """
+    parts = []
+    current_proc = proc
+    current_timeout = timeout
+
+    for attempt in range(STT_MAX_PARTS):
+        try:
+            stdout, _ = current_proc.communicate(timeout=current_timeout)
+            result = _parse_stt_output(stdout)
+        except subprocess.TimeoutExpired:
+            current_proc.kill()
+            current_proc.communicate()
+            break
+        except Exception as e:
+            log(f"STT error: {e}")
+            break
+
+        if not result:
+            break
+
+        # Immediately pre-roll the next process so it's already warm & listening
+        # while we do the completeness check and screen update below.
+        next_proc = start_stt_process() if attempt + 1 < STT_MAX_PARTS else None
+
+        parts.append(result)
+        merged = merge_transcripts(parts)
+
+        if not _is_incomplete(merged):
+            # Sentence is complete — kill the pre-rolled process we don't need
+            if next_proc:
+                next_proc.kill()
+                try:
+                    next_proc.communicate()
+                except Exception:
+                    pass
+            return merged
+
+        # Incomplete — collect the pre-rolled continuation
+        SCREEN.update(status="Listening for more...")
+        if next_proc is None:
+            return merged
+        current_proc = next_proc
+        current_timeout = STT_CONTINUATION_TIMEOUT
+
+    return merge_transcripts(parts) if parts else ""
+
+
+def listen(timeout: float = QUESTION_TIMEOUT) -> str:
+    """Start termux-speech-to-text and return the transcript."""
+    proc = start_stt_process()
+    return collect_stt_process(proc, timeout)
 
 def merge_transcripts(parts):
     """Merge STT partial results into one coherent transcript.
@@ -721,27 +897,33 @@ class JarvisTUI:
                     return
 
             if not question:
+                # Pre-roll STT so it's already capturing when the user speaks.
+                # Launch it now, speak "Yes?", then collect — the user's words
+                # are captured from the moment STT starts, not after TTS ends.
+                stt_proc = start_stt_process()
                 spoken = speak("Yes?")
                 wait_for_tts(spoken)
                 render("listening", "Listening for your question...")
-                question = listen_long()
+                question = collect_stt_process(stt_proc, QUESTION_TIMEOUT)
                 SCREEN.update(question=question or "")
 
             while question:
-                log(f"You: {question}")
+                SCREEN.update(question=question)
                 self.state = "thinking"
                 render("thinking", "Thinking...")
                 response = self.answer_question(question)
                 SCREEN.update(answer=response)
-                log(f"Jarvis: {response}")
                 self.state = "speaking"
                 render("speaking", "Speaking...")
+                # Pre-roll STT during TTS so it captures from the very start
+                # of the user's follow-up, not after a 1-3s STT warm-up delay.
+                stt_proc = start_stt_process()
                 spoken = speak(response)
                 wait_for_tts(spoken)
                 # Listen for a follow-up — STT owns the mic here, VAD is paused
                 self.state = "listening"
                 render("listening", "Listening for your reply...")
-                question = listen_long(timeout=CONVERSATION_IDLE_TIMEOUT)
+                question = collect_stt_process(stt_proc, CONVERSATION_IDLE_TIMEOUT)
                 SCREEN.update(question=question or "")
 
             log(f"Conversation ended (no reply after {CONVERSATION_IDLE_TIMEOUT:.0f}s)")
@@ -753,21 +935,19 @@ class JarvisTUI:
             self._resume_vad()
 
     def run(self):
-        print_banner()
-
-        # Verify termux-api
-        missing = [cmd for cmd in ("termux-tts-speak", "termux-speech-to-text", "termux-microphone-record", "ffmpeg")
+        # Verify termux-api before starting the TUI
+        missing = [cmd for cmd in ("termux-tts-speak", "termux-speech-to-text",
+                                   "termux-microphone-record", "ffmpeg")
                    if shutil.which(cmd) is None]
         if missing:
-            print("  ❌ termux-api not found! Run: pkg install termux-api")
-            print(f"     Missing command(s): {', '.join(missing)}")
+            sys.stdout.write("\033[?25h")  # restore cursor before error output
+            sys.stdout.flush()
+            print("❌  termux-api not found! Run: pkg install termux-api")
+            print(f"    Missing: {', '.join(missing)}")
             sys.exit(1)
 
-        log(f"Gateway: {GATEWAY_URL}")
-        log(f"Session: {SESSION_KEY}")
-        log(f"VAD: {'WebRTC VAD ✓' if HAS_VAD else 'Energy-only (no webrtcvad)'}")
-        log("Starting VAD loop... (Ctrl+C to stop)")
-        print()
+        log(f"Gateway: {GATEWAY_URL}  Session: {SESSION_KEY}")
+        log(f"VAD: {'WebRTC' if HAS_VAD else 'energy-only'}")
 
         self.running = True
         self.vad = VADLoop()
@@ -775,16 +955,19 @@ class JarvisTUI:
         vad_thread = threading.Thread(target=self.vad.vad_loop, args=(self.on_wake,), daemon=True)
         self.vad.start()
         vad_thread.start()
-        render("idle", f'Waiting for "{WAKE_WORD}"...')
+        render("idle")
 
         try:
             while self.running:
                 SCREEN.tick()
                 time.sleep(0.25)
         except KeyboardInterrupt:
-            print("\n\n  👋 Shutting down...")
+            pass
+        finally:
             self.vad.stop()
             self.running = False
+            sys.stdout.write("\033[?25h\n")  # restore cursor
+            sys.stdout.flush()
 
 
 
