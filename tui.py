@@ -43,7 +43,7 @@ SAMPLE_RATE   = 16000
 FRAME_DURATION_MS = 30
 ENERGY_THRESHOLD  = 800
 WAKE_WORD = os.environ.get("JARVIS_WAKE_WORD", "hello").strip().lower()
-REQUIRE_WAKE_WORD = os.environ.get("JARVIS_REQUIRE_WAKE_WORD", "1").lower() not in ("0", "false", "no")
+REQUIRE_WAKE_WORD = os.environ.get("JARVIS_REQUIRE_WAKE_WORD", "0").lower() not in ("0", "false", "no")
 WAKE_WORD_TIMEOUT = float(os.environ.get("JARVIS_WAKE_WORD_TIMEOUT", "5.0"))
 QUESTION_TIMEOUT = float(os.environ.get("JARVIS_QUESTION_TIMEOUT", "45"))
 CONVERSATION_IDLE_TIMEOUT = float(os.environ.get("JARVIS_CONVERSATION_IDLE_TIMEOUT", "15"))
@@ -196,8 +196,7 @@ class Screen:
         q_lines = _wrap(self.question, w - 2) if self.question else ["—"]
         a_lines = _wrap(self.answer, w - 2) if self.answer else ["—"]
 
-        wake_hint = f'say "{WAKE_WORD}" to wake'
-        footer_row = self._row(f"  {wake_hint}  ·  Ctrl+C to quit", w)
+        footer_row = self._row("  speak to wake  ·  Ctrl+C to quit", w)
 
         out = [
             top,
@@ -658,28 +657,20 @@ class JarvisTUI:
             ).start()
 
     def on_wake(self):
-        """Called by VADLoop when speech+silence detected."""
+        """Called by VADLoop when speech+silence detected.
+        Skips STT wake word check — VAD energy is the trigger."""
         if self.state != "idle":
             return
         self.state = "busy"
         self._pause_vad()
         try:
-            # Run a short STT to check for wake word
-            render("listening", f'Say "{WAKE_WORD}"...')
-            heard = listen(timeout=WAKE_WORD_TIMEOUT)
-            if not heard:
-                return
-            is_wake, question = extract_question(heard)
-            if not is_wake:
-                log(f"No wake word in: '{heard}'")
-                return
             render("wake", "")
-            self._do_conversation(question)
+            self._do_conversation()
         except Exception as e:
             log_exception("on_wake error", e)
         finally:
             self.state = "idle"
-            render("idle", f'Say "{WAKE_WORD}" to wake me')
+            render("idle", "Listening for voice...")
             self._resume_vad()
 
     def answer_question(self, question: str) -> str:
@@ -768,7 +759,7 @@ class JarvisTUI:
         )
         vad_thread.start()
 
-        render("idle", f'Say "{WAKE_WORD}" to wake me')
+        render("idle", "Listening for voice...")
 
         try:
             while self.running:
