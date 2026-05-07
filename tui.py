@@ -787,26 +787,33 @@ class Screen:
 
         buf = []
         if not self._started:
-            # First draw: clear entire screen, hide cursor
+            # First draw: clear entire screen + scrollback, hide cursor, go home
             buf.append("\033[2J\033[H\033[?25l")
             self._started = True
         elif resize:
-            # Terminal resized (keyboard shown/hidden): full clear to wipe old layout
+            # Terminal resized (keyboard shown/hidden): full clear then home
             buf.append("\033[2J\033[H")
             self._force_clear = False
         else:
-            # Normal redraw: jump to top-left
-            buf.append("\033[H")
+            # Move cursor UP by exactly how many lines we drew last frame.
+            # \033[{n}A is a *relative* move — safe even if terminal has scrolled,
+            # unlike \033[H which jumps to the scrollback-buffer top on Termux.
+            if self._last_line_count > 0:
+                buf.append(f"\033[{self._last_line_count}A")
+            buf.append("\033[1G")  # move to column 1 of current line
 
-        # Write each line followed by erase-to-end-of-line (\033[2K) so any
-        # stale characters from a wider previous frame are wiped
-        buf.append(("\033[2K\n").join(out))
-        buf.append("\033[2K")   # erase EOL on the last line too
+        # Write each line: erase whole line first (\033[2K erases left+right of
+        # cursor), then content, then \r\n.  Leftover chars from a previously
+        # wider frame are fully cleared before we overwrite.
+        for line in out:
+            buf.append("\033[2K")
+            buf.append(line)
+            buf.append("\r\n")
 
-        # Erase any lines below that existed in the previous frame but not this one
+        # Erase any extra lines that existed last frame but not this one
         extra = self._last_line_count - new_line_count
         for _ in range(max(0, extra)):
-            buf.append("\n\033[2K")
+            buf.append("\033[2K\r\n")
 
         self._last_line_count = new_line_count
         self._last_width = w
