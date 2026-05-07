@@ -428,6 +428,9 @@ class Screen:
         self.answer = ""
         self.frame = 0
         self._started = False
+        self._last_line_count = 0   # lines drawn in the previous frame
+        self._last_width = 0        # terminal width used in the previous frame
+        self._force_clear = False   # set True by SIGWINCH to trigger full 2J clear
         # ── Animation state ─────────────────────────────────────────
         self._anim_state_frame = 0    # resets on every state change
         self._prev_state = ""         # previous state (for transition effects)
@@ -779,17 +782,52 @@ class Screen:
             "",
         ]
 
-        if not self._started:
-            sys.stdout.write("\033[2J\033[H\033[?25l")
-            self._started = True
-        else:
-            sys.stdout.write("\033[H")
+        new_line_count = len(out)
+        resize = (w != self._last_width) or self._force_clear
 
-        sys.stdout.write("\n".join(out))
+        buf = []
+        if not self._started:
+            # First draw: clear entire screen, hide cursor
+            buf.append("\033[2J\033[H\033[?25l")
+            self._started = True
+        elif resize:
+            # Terminal resized (keyboard shown/hidden): full clear to wipe old layout
+            buf.append("\033[2J\033[H")
+            self._force_clear = False
+        else:
+            # Normal redraw: jump to top-left
+            buf.append("\033[H")
+
+        # Write each line followed by erase-to-end-of-line (\033[2K) so any
+        # stale characters from a wider previous frame are wiped
+        buf.append(("\033[2K\n").join(out))
+        buf.append("\033[2K")   # erase EOL on the last line too
+
+        # Erase any lines below that existed in the previous frame but not this one
+        extra = self._last_line_count - new_line_count
+        for _ in range(max(0, extra)):
+            buf.append("\n\033[2K")
+
+        self._last_line_count = new_line_count
+        self._last_width = w
+
+        sys.stdout.write("".join(buf))
         sys.stdout.flush()
 
 
 SCREEN = Screen()
+
+# Handle terminal resize (SIGWINCH) — fires when the Android soft keyboard
+# is shown or hidden, changing the terminal dimensions.  We set _force_clear
+# so the next draw_locked() call does a full \033[2J wipe before redrawing,
+# preventing the old wider/taller layout from bleeding through.
+try:
+    import signal as _signal
+    def _on_sigwinch(signum, frame):
+        SCREEN._force_clear = True
+    _signal.signal(_signal.SIGWINCH, _on_sigwinch)
+except (AttributeError, OSError):
+    pass   # SIGWINCH not available on all platforms
 
 
 def render(face: str, status: str = ""):
