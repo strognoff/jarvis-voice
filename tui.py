@@ -284,7 +284,11 @@ def speech_text(text: str) -> str:
 def speak(text: str):
     spoken = speech_text(text)
     try:
-        subprocess.run(["termux-tts-speak", spoken], capture_output=True, timeout=30)
+        subprocess.run(
+            ["termux-tts-speak", spoken],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=30,
+        )
     except Exception as e:
         log(f"TTS error: {e}")
     return spoken
