@@ -53,16 +53,18 @@ class TTSEngine:
         try:
             import requests
 
-            url = "https://api.elevenlabs.io/v1/text-to-speech/YOUR_VOICE_ID"
+            # Default voice: "Rachel" — override via config.elevenlabs_voice_id if set
+            voice_id = getattr(self.config, "elevenlabs_voice_id", None) or "21m00Tcm4TlvDq8ikWAM"
+            url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
             headers = {
-                "Accept": "audio/mp3",
+                "Accept": "audio/mpeg",
                 "Content-Type": "application/json",
-                "xi-api-key": self.config.elevenlabs_api_key
+                "xi-api-key": self.config.elevenlabs_api_key,
             }
             data = {
                 "text": text,
-                "voice_id": "EXAVITQ4Xr0uq3Z3G5F5",  # Default voice
-                "model_id": "eleven_monolingual_v1"
+                "model_id": "eleven_monolingual_v1",
+                "voice_settings": {"stability": 0.5, "similarity_boost": 0.75},
             }
 
             resp = requests.post(url, json=data, headers=headers, timeout=30)

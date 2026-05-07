@@ -7,6 +7,7 @@ import os
 import subprocess
 import threading
 import queue
+import time
 from pathlib import Path
 
 
@@ -49,6 +50,11 @@ class AudioManager:
         """Capture loop — tries pyaudio, falls back to termux."""
         try:
             import pyaudio
+
+            def _callback(in_data, frame_count, time_info, status_flags):
+                audio_queue.put(in_data)
+                return (None, pyaudio.paContinue)
+
             self.audio = pyaudio.PyAudio()
             self.stream = self.audio.open(
                 format=pyaudio.paInt16,
@@ -57,9 +63,7 @@ class AudioManager:
                 input=True,
                 input_device_index=self.config.mic_device,
                 frames_per_buffer=self.chunk_size,
-                stream_callback=lambda in_data, frame_count, time_info, status_flags: (
-                    (audio_queue.put(in_data), (None, pyaudio.paContinue))[1]
-                )
+                stream_callback=_callback,
             )
             self.stream.start_stream()
             while self.running:
@@ -138,12 +142,16 @@ class AudioManager:
         """Play a beep sound (for wake word detection feedback)."""
         try:
             import numpy as np
+            import pyaudio
             sample_count = int(self.sample_rate * duration)
             t = np.linspace(0, duration, sample_count, False)
-            wave = (np.sin(2 * np.pi * freq * t) * 32767).astype(np.int16)
-            stream = self.audio.open(format=self.audio._pa, channels=1, rate=self.sample_rate, output=True) if self.audio else None
-            if stream:
-                stream.write(wave.tobytes())
-                stream.close()
+            tone = (np.sin(2 * np.pi * freq * t) * 32767).astype(np.int16)
+            pa = self.audio if self.audio else pyaudio.PyAudio()
+            stream = pa.open(format=pyaudio.paInt16, channels=1, rate=self.sample_rate, output=True)
+            stream.write(tone.tobytes())
+            stream.stop_stream()
+            stream.close()
+            if not self.audio:
+                pa.terminate()
         except Exception:
             pass  # Silent fail for beep
