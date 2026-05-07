@@ -48,8 +48,7 @@ REQUIRE_WAKE_WORD = os.environ.get("JARVIS_REQUIRE_WAKE_WORD", "0").lower() not 
 WAKE_WORD_TIMEOUT = float(os.environ.get("JARVIS_WAKE_WORD_TIMEOUT", "5.0"))
 QUESTION_TIMEOUT = float(os.environ.get("JARVIS_QUESTION_TIMEOUT", "45"))
 CONVERSATION_IDLE_TIMEOUT = float(os.environ.get("JARVIS_CONVERSATION_IDLE_TIMEOUT", "15"))
-STT_CONTINUATION_TIMEOUT = float(os.environ.get("JARVIS_STT_CONTINUATION_TIMEOUT", "8.0"))
-STT_MAX_PARTS = int(os.environ.get("JARVIS_STT_MAX_PARTS", "3"))
+
 TTS_SETTLE_SECONDS = float(os.environ.get("JARVIS_TTS_SETTLE_SECONDS", "0.8"))
 TTS_WORDS_PER_MINUTE = float(os.environ.get("JARVIS_TTS_WORDS_PER_MINUTE", "155"))
 TTS_MAX_WAIT_SECONDS = float(os.environ.get("JARVIS_TTS_MAX_WAIT_SECONDS", "18"))
@@ -388,45 +387,6 @@ def _record_wav(wav_path: str, duration: float) -> bool:
         log(f"ffmpeg convert error: {e}")
         return False
 
-_INCOMPLETE_ENDINGS = {
-    "a", "an", "the",
-    "in", "on", "at", "to", "of", "for", "from", "with", "by", "about",
-    "into", "onto", "upon", "within", "without", "between", "among",
-    "near", "over", "under", "through", "across", "along", "beside",
-    "and", "or", "but", "nor",
-    "my", "your", "his", "her", "its", "our", "their",
-    "this", "that", "these", "those",
-    "what", "where", "when", "why", "how", "which", "who", "whose",
-}
-
-def _is_incomplete(text: str) -> bool:
-    if not text:
-        return False
-    last_word = text.rstrip(".,!?").split()[-1].lower()
-    return last_word in _INCOMPLETE_ENDINGS
-
-def merge_transcripts(parts):
-    merged = ""
-    for part in (p.strip() for p in parts if p and p.strip()):
-        if not merged:
-            merged = part
-            continue
-        lm, lp = merged.lower(), part.lower()
-        if lp in lm:
-            continue
-        if lm in lp:
-            merged = part
-            continue
-        mw, pw = lm.split(), lp.split()
-        overlap = 0
-        for n in range(min(len(mw), len(pw), 4), 0, -1):
-            if mw[-n:] == pw[:n]:
-                overlap = n
-                break
-        new_words = part.split()[overlap:]
-        if new_words:
-            merged = merged + " " + " ".join(new_words)
-    return merged.strip()
 
 def listen(timeout: float = QUESTION_TIMEOUT) -> str:
     """Record speech then transcribe with whisper-cli.
@@ -448,16 +408,16 @@ def listen(timeout: float = QUESTION_TIMEOUT) -> str:
         except Exception:
             pass
 
-    CHUNK = 1.5       # seconds per recording slice
-    SILENCE_AFTER = 2 # consecutive silent chunks before stopping
-    MAX_SPEECH = 10   # max seconds of speech before forcing stop
+    CHUNK = 1.0        # seconds per recording slice
+    SILENCE_AFTER = 1  # silent chunks after speech before stopping (1s)
+    MAX_SPEECH = 8     # max seconds of speech before forcing transcription
 
     speech_chunks = 0
     silence_chunks = 0
     all_pcm = b""
     deadline = time.time() + timeout
 
-    SCREEN.update(status="Listening...")
+    SCREEN.update(status="Waiting for speech...")
 
     while time.time() < deadline:
         ok = _record_wav(chunk_path, CHUNK)
@@ -483,16 +443,16 @@ def listen(timeout: float = QUESTION_TIMEOUT) -> str:
             speech_chunks += 1
             silence_chunks = 0
             all_pcm += pcm
-            SCREEN.update(status="Listening... ●")
+            SCREEN.update(status="Hearing you...")
         elif speech_chunks > 0:
             silence_chunks += 1
             all_pcm += pcm  # keep the trailing silence for natural audio
-            SCREEN.update(status="Listening... ○")
+            SCREEN.update(status="Got it, processing...")
             if silence_chunks >= SILENCE_AFTER:
                 break  # speech ended
         else:
             # No speech yet — keep waiting
-            SCREEN.update(status="Listening...")
+            SCREEN.update(status="Waiting for speech...")
 
         if speech_chunks * CHUNK >= MAX_SPEECH:
             break
@@ -512,19 +472,8 @@ def listen(timeout: float = QUESTION_TIMEOUT) -> str:
         log(f"listen: WAV write error: {e}")
         return ""
 
-    SCREEN.update(status="Transcribing...")
-    text = _transcribe_wav(accumulated)
-
-    # Chain a continuation if sentence ended on a dangling word
-    if text and _is_incomplete(text) and time.time() < deadline:
-        SCREEN.update(status="Listening for more...")
-        extra_wav = str(tmp / "jarvis_listen2.wav")
-        if _record_wav(extra_wav, min(6.0, deadline - time.time())):
-            extra = _transcribe_wav(extra_wav)
-            if extra:
-                text = merge_transcripts([text, extra])
-
-    return text
+    SCREEN.update(status="Transcribing your speech...")
+    return _transcribe_wav(accumulated)
 
 def listen_long(timeout: float = QUESTION_TIMEOUT) -> str:
     return listen(timeout)
@@ -752,7 +701,7 @@ class VADLoop:
                     silence_frames = 0
                     if not is_speaking and speech_frames >= min_speech:
                         is_speaking = True
-                        render("wake", "Heard something...")
+                        render("wake", "Voice detected...")
                 elif is_speaking:
                     silence_frames += 1
                     if silence_frames >= min_silence:
@@ -814,13 +763,13 @@ class JarvisTUI:
         self.state = "busy"
         self._pause_vad()
         try:
-            render("wake", "")
+            render("wake", "Waking up...")
             self._do_conversation()
         except Exception as e:
             log_exception("on_wake error", e)
         finally:
             self.state = "idle"
-            render("idle", "Listening for voice...")
+            render("idle", "Speak to wake me up")
             self._resume_vad()
 
     def answer_question(self, question: str) -> str:
@@ -844,40 +793,46 @@ class JarvisTUI:
         return response
 
     def _do_conversation(self, question: str = ""):
-        """Run a full conversation: Yes? → listen → think → speak → loop."""
+        """Run a full conversation: beep → listen → think → speak → loop."""
         self.state = "busy"
         self.pending_intent = None
 
         try:
-            # If the wake utterance already contained a question (e.g. "Jarvis
-            # what time is it"), skip the "Yes?" prompt.
             if not question:
-                render("speaking", "")
-                speak("Yes?")
-                render("listening", "")
-                question = collect_stt_process(start_stt_process(), QUESTION_TIMEOUT)
+                # Say "Yes?" in background so mic opens immediately after
+                render("listening", "Ask your question...")
+                threading.Thread(
+                    target=lambda: subprocess.run(
+                        ["termux-tts-speak", "Yes?"],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        timeout=5,
+                    ),
+                    daemon=True,
+                ).start()
+                time.sleep(0.3)
+                question = listen(timeout=QUESTION_TIMEOUT)
                 SCREEN.update(question=question or "")
 
             while question:
                 SCREEN.update(question=question)
-                render("thinking", "")
+                render("thinking", "Working on it...")
                 response = self.answer_question(question)
                 SCREEN.update(answer=response)
-                render("speaking", "")
-                speak(response)                 # blocks until TTS done
-                render("listening", "")
-                question = collect_stt_process(start_stt_process(), CONVERSATION_IDLE_TIMEOUT)
+                render("speaking", "Answering...")
+                speak(response)
+                render("listening", "Your turn — speak or stay silent to end")
+                question = listen(timeout=CONVERSATION_IDLE_TIMEOUT)
                 SCREEN.update(question=question or "")
 
-            # Silence — end conversation naturally
-            render("speaking", "")
+            # Silence timeout — end conversation
+            render("speaking", "Ending conversation...")
             speak("Goodbye!")
 
         except Exception as e:
             log_exception("conversation error", e)
         finally:
             self.state = "idle"
-            SCREEN.update(state="idle", status=f'Say "{WAKE_WORD}" to wake me')
+            render("idle", "Speak to wake me up")
 
     def run(self):
         missing = [cmd for cmd in ("termux-tts-speak", "whisper-cli",
@@ -916,7 +871,7 @@ class JarvisTUI:
         )
         vad_thread.start()
 
-        render("idle", "Listening for voice...")
+        render("idle", "Speak to wake me up")
 
         try:
             while self.running:
