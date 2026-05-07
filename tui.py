@@ -851,16 +851,83 @@ def speech_text(text: str) -> str:
     text = re.sub(r"\s+", " ", text).strip()
     return text or "Done."
 
-def speak(text: str):
+def _split_sentences(text: str, max_chars: int = 200) -> list[str]:
+    """Split text into speakable chunks at sentence boundaries.
+
+    Splits on '.', '!', '?', ':' followed by whitespace, keeping each chunk
+    under max_chars. Falls back to splitting on commas, then hard-truncating
+    if no good boundary is found.
+    """
+    import re as _re
+    # Split on sentence-ending punctuation followed by space/end
+    raw = _re.split(r'(?<=[.!?:])\s+', text.strip())
+    chunks: list[str] = []
+    current = ""
+    for sentence in raw:
+        if not sentence:
+            continue
+        if not current:
+            current = sentence
+        elif len(current) + 1 + len(sentence) <= max_chars:
+            current += " " + sentence
+        else:
+            chunks.append(current)
+            current = sentence
+    if current:
+        chunks.append(current)
+
+    # If any chunk is still too long, split on commas
+    final: list[str] = []
+    for chunk in chunks:
+        if len(chunk) <= max_chars:
+            final.append(chunk)
+        else:
+            parts = _re.split(r'(?<=,)\s+', chunk)
+            buf = ""
+            for part in parts:
+                if not buf:
+                    buf = part
+                elif len(buf) + 1 + len(part) <= max_chars:
+                    buf += " " + part
+                else:
+                    final.append(buf)
+                    buf = part
+            if buf:
+                final.append(buf)
+
+    return [c.strip() for c in final if c.strip()]
+
+
+def speak(text: str) -> str:
+    """Speak text via termux-tts-speak, chunked into short sentences.
+
+    Long responses used to time out as a single TTS call. We now split at
+    sentence boundaries (max 200 chars per chunk) so each call completes
+    well within the per-chunk timeout.
+    """
     spoken = speech_text(text)
-    try:
-        subprocess.run(
-            ["termux-tts-speak", spoken],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            timeout=30,
-        )
-    except Exception as e:
-        log(f"TTS error: {e}")
+    if not spoken:
+        return spoken
+
+    chunks = _split_sentences(spoken, max_chars=200)
+    if not chunks:
+        return spoken
+
+    log(f"TTS: {len(chunks)} chunk(s), total {len(spoken)} chars")
+    for i, chunk in enumerate(chunks):
+        try:
+            subprocess.run(
+                ["termux-tts-speak", chunk],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=15,
+            )
+        except subprocess.TimeoutExpired:
+            log_error(f"TTS chunk {i+1}/{len(chunks)} timed out — skipping rest: {chunk[:60]!r}")
+            break
+        except Exception as e:
+            log_error(f"TTS chunk {i+1}/{len(chunks)} error: {e}")
+            break
+
     return spoken
 
 def wait_for_tts(text: str):
