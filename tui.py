@@ -429,34 +429,98 @@ def merge_transcripts(parts):
     return merged.strip()
 
 def listen(timeout: float = QUESTION_TIMEOUT) -> str:
-    """Record audio then transcribe with Whisper.
+    """Record speech then transcribe with whisper-cli.
 
-    Records for up to `timeout` seconds, but uses a 6s chunk approach:
-    records 6s, transcribes, and if incomplete chains another 6s chunk.
-    This gives natural sentence completion without waiting the full timeout.
+    Uses VAD to detect end-of-speech so we stop recording as soon as the
+    user goes quiet — no fixed sleep. Records 1s chunks, accumulates audio,
+    stops after detecting speech followed by silence (or timeout).
     """
     import tempfile
-    wav = str(Path(tempfile.gettempdir()) / "jarvis_listen.wav")
 
-    # Record the first chunk (capped at timeout, max 8s for a natural utterance)
-    record_secs = min(timeout, 8.0)
-    SCREEN.update(status="Recording...")
-    ok = _record_wav(wav, record_secs)
-    if not ok:
+    tmp = Path(tempfile.gettempdir())
+    chunk_path = str(tmp / "jarvis_chunk.wav")
+    accumulated = str(tmp / "jarvis_listen_full.wav")
+
+    # Clean up any leftover files
+    for p in (chunk_path, accumulated, chunk_path + ".raw.wav"):
+        try:
+            Path(p).unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    CHUNK = 1.5       # seconds per recording slice
+    SILENCE_AFTER = 2 # consecutive silent chunks before stopping
+    MAX_SPEECH = 10   # max seconds of speech before forcing stop
+
+    speech_chunks = 0
+    silence_chunks = 0
+    all_pcm = b""
+    deadline = time.time() + timeout
+
+    SCREEN.update(status="Listening...")
+
+    while time.time() < deadline:
+        ok = _record_wav(chunk_path, CHUNK)
+        if not ok:
+            break
+
+        # Read PCM to check energy
+        try:
+            result = subprocess.run(
+                ["ffmpeg", "-hide_banner", "-loglevel", "error",
+                 "-i", chunk_path, "-ar", "16000", "-ac", "1",
+                 "-f", "s16le", "-"],
+                capture_output=True, timeout=5
+            )
+            pcm = result.stdout
+        except Exception:
+            pcm = b""
+
+        rms = compute_rms(pcm) if pcm else 0
+        has_speech = rms > ENERGY_THRESHOLD
+
+        if has_speech:
+            speech_chunks += 1
+            silence_chunks = 0
+            all_pcm += pcm
+            SCREEN.update(status="Listening... ●")
+        elif speech_chunks > 0:
+            silence_chunks += 1
+            all_pcm += pcm  # keep the trailing silence for natural audio
+            SCREEN.update(status="Listening... ○")
+            if silence_chunks >= SILENCE_AFTER:
+                break  # speech ended
+        else:
+            # No speech yet — keep waiting
+            SCREEN.update(status="Listening...")
+
+        if speech_chunks * CHUNK >= MAX_SPEECH:
+            break
+
+    if not all_pcm:
+        return ""
+
+    # Write accumulated PCM to a WAV for whisper-cli
+    try:
+        import wave as _wave
+        with _wave.open(accumulated, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(16000)
+            wf.writeframes(all_pcm)
+    except Exception as e:
+        log(f"listen: WAV write error: {e}")
         return ""
 
     SCREEN.update(status="Transcribing...")
-    text = _transcribe_wav(wav)
-    if not text:
-        return ""
+    text = _transcribe_wav(accumulated)
 
-    # Chain a continuation if the sentence ended on a dangling word
-    if _is_incomplete(text) and timeout > record_secs:
+    # Chain a continuation if sentence ended on a dangling word
+    if text and _is_incomplete(text) and time.time() < deadline:
         SCREEN.update(status="Listening for more...")
-        wav2 = str(Path(tempfile.gettempdir()) / "jarvis_listen2.wav")
-        ok2 = _record_wav(wav2, min(6.0, timeout - record_secs))
-        if ok2:
-            extra = _transcribe_wav(wav2)
+        extra_wav = str(tmp / "jarvis_listen2.wav")
+        if _record_wav(extra_wav, min(6.0, deadline - time.time())):
+            extra = _transcribe_wav(extra_wav)
             if extra:
                 text = merge_transcripts([text, extra])
 
@@ -724,13 +788,15 @@ class JarvisTUI:
         """Stop VAD and release mic before STT takes over."""
         if self.vad:
             self.vad.stop()
-            # Explicitly stop any in-flight recording
+            # Stop any in-flight recording and give it time to release the mic.
+            # VAD records 1s chunks — worst case we need to wait for the current
+            # chunk to finish + ffmpeg convert + mic release before we can record.
             subprocess.run(
                 ['termux-microphone-record', '-q'],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 timeout=3
             )
-            time.sleep(0.5)
+            time.sleep(1.5)
 
     def _resume_vad(self):
         """Restart VAD in a fresh thread after conversation ends."""
