@@ -906,6 +906,35 @@ def _split_sentences(text: str, max_chars: int = 200) -> list[str]:
     return [c.strip() for c in final if c.strip()]
 
 
+def _beep():
+    """Fire a short system notification sound via termux-notification.
+
+    Runs in a daemon thread so it never blocks the main flow.
+    termux-notification requires the termux-api package.
+    """
+    def _fire():
+        try:
+            subprocess.run(
+                ["termux-notification",
+                 "--sound",
+                 "--title", "",
+                 "--content", "",
+                 "--priority", "high",
+                 "--id", "jarvis_beep"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=5,
+            )
+            # Dismiss immediately so no notification lingers
+            subprocess.run(
+                ["termux-notification-remove", "jarvis_beep"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=3,
+            )
+        except Exception as e:
+            log_warn(f"beep failed: {e}")
+    threading.Thread(target=_fire, daemon=True).start()
+
+
 def speak(text: str) -> str:
     """Speak text via termux-tts-speak, chunked into short sentences.
 
@@ -1673,14 +1702,7 @@ class JarvisTUI:
         try:
             if not question:
                 render("listening", "Ask your question — I'm recording for 8s")
-                threading.Thread(
-                    target=lambda: subprocess.run(
-                        ["termux-tts-speak", "Yes?"],
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                        timeout=5,
-                    ),
-                    daemon=True,
-                ).start()
+                _beep()
                 question = listen(timeout=QUESTION_TIMEOUT)
                 SCREEN.update(question=question or "")
 
@@ -1708,8 +1730,8 @@ class JarvisTUI:
 
             else:
                 # Silence timeout — end conversation normally
-                render("speaking", "Ending conversation...")
-                speak("Goodbye!")
+                render("idle", "Conversation ended")
+                _beep()
 
         except Exception as e:
             log_exception("conversation error", e)
