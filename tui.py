@@ -379,6 +379,7 @@ def _log_system_info():
         "GATEWAY_URL": GATEWAY_URL,
         "SESSION_KEY": SESSION_KEY,
         "REQUIRE_WAKE_WORD": str(REQUIRE_WAKE_WORD),
+        "WAKE_WORD": f"{WAKE_WORD} (listen {WAKE_WORD_TIMEOUT}s)" if REQUIRE_WAKE_WORD else "(disabled)",
         "ENERGY_THRESHOLD": str(ENERGY_THRESHOLD),
         "STT_ENERGY_THRESHOLD": str(STT_ENERGY_THRESHOLD),
         "RECORD_DURATION": str(RECORD_DURATION),
@@ -1471,7 +1472,10 @@ class VADLoop:
         min_silence = silence_threshold_frames
         is_speaking = False
         consecutive_failures = 0
-        backoff = 5.0   # seconds to wait after mic service declared dead
+        backoff = 5.0      # seconds to wait after mic service declared dead
+        chunks_recorded = 0
+        MIC_REST_INTERVAL = 30   # release mic every ~30s to prevent Android audio lock-up
+        MIC_REST_SECONDS  = 2.0  # how long to pause before resuming
 
         while self.running:
             # Remove old file
@@ -1503,6 +1507,14 @@ class VADLoop:
                 if consecutive_failures > 0:
                     log(f"[vad] mic service recovered after {consecutive_failures} failure(s)")
                 consecutive_failures = 0
+                chunks_recorded += 1
+
+                # Periodic mic rest — release Android audio hardware briefly to
+                # prevent the Termux API service from locking up after ~5min idle
+                if chunks_recorded % MIC_REST_INTERVAL == 0:
+                    log(f"[vad] periodic mic rest ({MIC_REST_SECONDS}s) at chunk {chunks_recorded}")
+                    time.sleep(MIC_REST_SECONDS)
+                    backoff = 5.0   # reset backoff after a successful rest cycle
 
             if not wav_file.exists() or wav_file.stat().st_size < 512:
                 continue
@@ -1557,7 +1569,8 @@ class JarvisTUI:
         self.running = False
         self.pending_intent = None
         self.vad = None
-        self._vad_thread = None   # updated by run() and _resume_vad(); watched by watchdog
+        self._vad_thread = None          # updated by run() and _resume_vad(); watched by watchdog
+        self._vad_resume_lock = threading.Lock()  # prevents double-resume races
 
     def _pause_vad(self):
         """Stop VAD and release mic before STT takes over."""
@@ -1581,26 +1594,57 @@ class JarvisTUI:
     def _resume_vad(self):
         """Restart VAD using a FRESH VADLoop instance to avoid running-flag races.
 
-        The old instance's vad_loop thread exits naturally (self.running=False).
-        We create a new VADLoop so the new thread starts with a clean running=True
-        and there is no shared state with the old thread that is winding down.
-        self._vad_thread is updated so the watchdog always checks the live thread.
+        Serialised by _vad_resume_lock so simultaneous calls from the watchdog
+        and on_wake's finally block don't create two competing VADLoops.
         """
-        log("Resuming VAD — creating fresh VADLoop")
-        self.vad = VADLoop()
-        self.vad.start()
-        self._vad_thread = _watched_thread("vad-loop-resume", self.vad.vad_loop, self.on_wake)
-        self._vad_thread.start()
-        log("VAD resumed — listening for wake")
+        with self._vad_resume_lock:
+            # Idempotent: if a live thread already exists, don't start another
+            if self._vad_thread is not None and self._vad_thread.is_alive():
+                log("_resume_vad: VAD thread already alive — skipping duplicate resume")
+                return
+            log("Resuming VAD — creating fresh VADLoop")
+            self.vad = VADLoop()
+            self.vad.start()
+            self._vad_thread = _watched_thread("vad-loop-resume", self.vad.vad_loop, self.on_wake)
+            self._vad_thread.start()
+            log("VAD resumed — listening for wake")
 
     def on_wake(self):
         """Called by VADLoop when speech+silence detected.
-        Skips STT wake word check — VAD energy is the trigger."""
+
+        If REQUIRE_WAKE_WORD is True: transcribes the triggering audio and
+        checks for WAKE_WORD before entering the conversation. This means the
+        wake word itself triggers the app — energy detection is just the gate
+        to attempt transcription. If the word isn't found, returns silently to
+        idle without saying anything.
+
+        If REQUIRE_WAKE_WORD is False: any sound above threshold triggers the
+        conversation immediately (original behaviour).
+        """
         if self.state != "idle":
             return
         self.state = "busy"
         self._pause_vad()
         try:
+            if REQUIRE_WAKE_WORD:
+                # Transcribe the short VAD-trigger clip to check for the wake word
+                render("wake", f"Checking for '{WAKE_WORD}'...")
+                import tempfile as _tf
+                wake_wav = str(Path(_tf.gettempdir()) / "jarvis_wake_check.wav")
+                ok = _record_wav(wake_wav, WAKE_WORD_TIMEOUT)
+                if ok:
+                    text = _transcribe_wav(wake_wav)
+                    is_wake, _ = extract_question(text)
+                    log(f"Wake word check: heard={text[:80]!r} found={is_wake}")
+                else:
+                    is_wake = False
+                    log("Wake word check: recording failed")
+
+                if not is_wake:
+                    # Not the wake word — go back to idle silently
+                    log(f"Wake word '{WAKE_WORD}' not detected — returning to idle")
+                    return
+
             render("wake", "Waking up...")
             self._do_conversation()
         except Exception as e:
@@ -1637,13 +1681,12 @@ class JarvisTUI:
         return response
 
     def _do_conversation(self, question: str = ""):
-        """Run a full conversation: beep → listen → think → speak → loop."""
+        """Run a full conversation: say Yes? → listen → think → speak → loop."""
         self.state = "busy"
         self.pending_intent = None
 
         try:
             if not question:
-                # Say "Yes?" in background so mic opens immediately after
                 render("listening", "Ask your question — I'm recording for 8s")
                 threading.Thread(
                     target=lambda: subprocess.run(
@@ -1684,6 +1727,7 @@ class JarvisTUI:
         # Clean up any stale temp files left by a previous crash
         import tempfile, glob as _glob
         stale = set(_glob.glob(str(Path(tempfile.gettempdir()) / "jarvis_*.wav")))
+        stale |= set(_glob.glob(str(Path(tempfile.gettempdir()) / "jarvis_wake_check.wav")))
         for f in stale:
             try:
                 Path(f).unlink(missing_ok=True)
