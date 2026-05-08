@@ -1488,6 +1488,22 @@ class VADLoop:
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                     timeout=2
                 )
+            except subprocess.TimeoutExpired:
+                # Mic service unresponsive — likely screen lock revoked mic access.
+                # Block for up to 180s waiting for Android to restore mic (screen unlock).
+                log_warn("[vad] stop command timed out — mic likely locked, waiting up to 180s for recovery")
+                SCREEN.update(status="⏳ Mic locked — waiting for screen unlock…")
+                try:
+                    subprocess.run(
+                        ['termux-microphone-record', '-q'],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        timeout=180
+                    )
+                    log("[vad] mic service recovered after extended wait")
+                    SCREEN.update(status="🎙 Listening…")
+                except Exception as e:
+                    log_warn(f"[vad] stop command failed after 180s wait: {e}")
+                    stop_ok = False
             except Exception as e:
                 log_warn(f"[vad] stop command failed: {e}")
                 stop_ok = False
