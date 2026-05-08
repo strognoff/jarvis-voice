@@ -906,33 +906,65 @@ def _split_sentences(text: str, max_chars: int = 200) -> list[str]:
     return [c.strip() for c in final if c.strip()]
 
 
-def _beep():
-    """Fire a short system notification sound via termux-notification.
+_BEEP_WAKE = APP_DIR / "beep_wake.wav"   # high tone — "I'm listening"
+_BEEP_END  = APP_DIR / "beep_end.wav"    # low tone  — "conversation over"
 
-    Runs in a daemon thread so it never blocks the main flow.
-    termux-notification requires the termux-api package.
+
+def _ensure_beeps():
+    """Generate beep WAV files via ffmpeg if they don't exist yet."""
+    specs = [
+        (_BEEP_WAKE, "880", "0.18"),   # 880 Hz, 0.18s
+        (_BEEP_END,  "440", "0.35"),   # 440 Hz, 0.35s
+    ]
+    for path, freq, dur in specs:
+        if not path.exists():
+            try:
+                subprocess.run(
+                    ["ffmpeg", "-y", "-f", "lavfi",
+                     "-i", f"sine=frequency={freq}:duration={dur}",
+                     "-ar", "44100", str(path)],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    timeout=10,
+                )
+                log(f"Generated beep: {path.name}")
+            except Exception as e:
+                log_warn(f"Could not generate {path.name}: {e}")
+
+
+def _beep(kind: str = "wake"):
+    """Play a short beep sound in a background thread.
+
+    kind="wake" → high tone (listening),  kind="end" → low tone (done).
+    Tries termux-media-player first, falls back to ffplay.
     """
-    def _fire():
-        try:
-            subprocess.run(
-                ["termux-notification",
-                 "--sound",
-                 "--title", "",
-                 "--content", "",
-                 "--priority", "high",
-                 "--id", "jarvis_beep"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                timeout=5,
-            )
-            # Dismiss immediately so no notification lingers
-            subprocess.run(
-                ["termux-notification-remove", "jarvis_beep"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                timeout=3,
-            )
-        except Exception as e:
-            log_warn(f"beep failed: {e}")
-    threading.Thread(target=_fire, daemon=True).start()
+    path = str(_BEEP_WAKE if kind == "wake" else _BEEP_END)
+
+    def _play():
+        # Try termux-media-player (built into Termux:API)
+        if shutil.which("termux-media-player"):
+            try:
+                subprocess.run(
+                    ["termux-media-player", "play", path],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    timeout=5,
+                )
+                return
+            except Exception:
+                pass
+        # Fallback: ffplay (part of ffmpeg suite)
+        if shutil.which("ffplay"):
+            try:
+                subprocess.run(
+                    ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", path],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    timeout=5,
+                )
+                return
+            except Exception:
+                pass
+        log_warn("_beep: no audio player available (need termux-media-player or ffplay)")
+
+    threading.Thread(target=_play, daemon=True).start()
 
 
 def speak(text: str) -> str:
@@ -1731,7 +1763,7 @@ class JarvisTUI:
             else:
                 # Silence timeout — end conversation normally
                 render("idle", "Conversation ended")
-                _beep()
+                _beep(kind="end")
 
         except Exception as e:
             log_exception("conversation error", e)
@@ -1742,11 +1774,11 @@ class JarvisTUI:
     def run(self):
         _log_session_banner("START")
         _log_system_info()
+        _ensure_beeps()
 
         # Clean up any stale temp files left by a previous crash
         import tempfile, glob as _glob
         stale = set(_glob.glob(str(Path(tempfile.gettempdir()) / "jarvis_*.wav")))
-        stale |= set(_glob.glob(str(Path(tempfile.gettempdir()) / "jarvis_wake_check.wav")))
         for f in stale:
             try:
                 Path(f).unlink(missing_ok=True)

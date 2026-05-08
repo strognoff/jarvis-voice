@@ -14,10 +14,14 @@ build/
 .venv/
 venv/
 
-# Temp audio files
-*.wav
+# Temp audio files (keep generated beeps)
 *.m4a
 *.raw.wav
+/tmp/*.wav
+jarvis_*.wav
+# but keep the generated beep assets
+!beep_wake.wav
+!beep_end.wav
 
 # Wheel cache
 *.whl
