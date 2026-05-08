@@ -117,7 +117,7 @@ def compute_rms(audio_bytes: bytes) -> float:
 # ── TUI ─────────────────────────────────────────────────────────────
 
 _STATE_META = {
-    "idle":      ("😴", "Waiting..."),
+    "idle":      ("😴", ""),
     "busy":      ("🤖", ""),
     "wake":      ("👀", "Wake detected!"),
     "listening": ("🎤", "Listening"),
@@ -743,7 +743,8 @@ class Screen:
 
         # ── You / question section (typewriter) ──────────────────────
         q_text = self._displayed_q or self._target_q
-        q_lines = _wrap(q_text, w - 4) if q_text else ["—"]
+        has_q = bool(q_text)
+        q_lines = _wrap(q_text, w - 4) if has_q else []
         you_label_row = crow(_c("you_label") + "  ◂ You" + R, 6)
         you_rows = [
             crow(_c("you_text") + "    " + l + R, 4 + len(l))
@@ -752,7 +753,8 @@ class Screen:
 
         # ── Jarvis / answer section (typewriter) ─────────────────────
         a_text = self._displayed_a or self._target_a
-        a_lines = _wrap(a_text, w - 4) if a_text else ["—"]
+        has_a = bool(a_text)
+        a_lines = _wrap(a_text, w - 4) if has_a else []
         jarvis_label_row = crow(_c("jarvis_label") + "  ◈ Jarvis" + R, 9)
         jarvis_rows = [
             crow(_c("jarvis_text") + "    " + l + R, 4 + len(l))
@@ -772,12 +774,12 @@ class Screen:
             *face_status_rows,
             blank(),
             mid,
-            you_label_row,
-            *you_rows,
-            mid,
-            jarvis_label_row,
-            *jarvis_rows,
-            mid,
+        ]
+        if has_q:
+            out += [you_label_row, *you_rows, mid]
+        if has_a:
+            out += [jarvis_label_row, *jarvis_rows, mid]
+        out += [
             footer_row,
             bot,
             "",
@@ -1709,7 +1711,7 @@ class JarvisTUI:
             log_exception("on_wake error", e)
         finally:
             self.state = "idle"
-            render("idle", "Speak to wake me up")
+            render("idle", "")
             self._resume_vad()
 
     def answer_question(self, question: str) -> str:
@@ -1788,13 +1790,13 @@ class JarvisTUI:
 
             else:
                 # Silence timeout — end conversation normally
-                render("idle", "Speak to wake me up")
+                render("idle", "")
 
         except Exception as e:
             log_exception("conversation error", e)
         finally:
             self.state = "idle"
-            render("idle", "Speak to wake me up")
+            render("idle", "")
 
     def run(self):
         _log_session_banner("START")
@@ -1880,7 +1882,7 @@ class JarvisTUI:
 
         _watched_thread("watchdog", _watchdog_fn).start()
 
-        render("idle", "Speak to wake me up")
+        render("idle", "")
         log("Ready — waiting for voice activity")
 
         exit_reason = "normal"
