@@ -1772,8 +1772,7 @@ class JarvisTUI:
 
             else:
                 # Silence timeout — end conversation normally
-                render("idle", "Conversation ended")
-                _beep(kind="end")
+                render("idle", "Speak to wake me up")
 
         except Exception as e:
             log_exception("conversation error", e)
