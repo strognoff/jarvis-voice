@@ -1628,14 +1628,16 @@ class JarvisTUI:
     def answer_question(self, question: str) -> str:
         # Wake word gate — only applies on first-word check, not mid-conversation
         if REQUIRE_WAKE_WORD:
-            first_word = question.strip().lower().split()[0] if question.strip() else ""
-            if first_word != WAKE_WORD:
-                msg = f"No wake word '{WAKE_WORD}' — not sending to OpenClaw"
-                log(msg)
-                SCREEN.update(status=msg)
-                return ""   # empty → conversation loop ends, back to idle
-            # Strip the wake word before sending
-            question = question.strip()[len(first_word):].strip()
+            words = question.strip().split()
+            # Strip punctuation from the first word so "Jarvis," matches "jarvis"
+            first_word_clean = words[0].strip(".,!?;:\"'").lower() if words else ""
+            if first_word_clean != WAKE_WORD:
+                log(f"Wake word '{WAKE_WORD}' not found — first word was '{first_word_clean}' in: {question!r}")
+                SCREEN.update(status=f"Heard: '{first_word_clean}' — expected '{WAKE_WORD}'")
+                return None   # sentinel: caller handles display
+            # Wake word matched — show it on screen and strip it from the question
+            SCREEN.update(status=f"◈ Wake word '{WAKE_WORD}' ✓")
+            question = " ".join(words[1:]).strip(".,!?;: ")
             log(f"Wake word '{WAKE_WORD}' detected — sending: {question!r}")
 
         SCREEN.update(status="Sending to OpenClaw...")
@@ -1686,6 +1688,17 @@ class JarvisTUI:
                 SCREEN.update(question=question)
                 render("thinking", "Working on it...")
                 response = self.answer_question(question)
+
+                if response is None:
+                    # Wake word required but not spoken as first word.
+                    # status was already set to "Heard: 'X' — expected 'Y'" by answer_question.
+                    SCREEN.update(
+                        state="error",
+                        answer=f"⚠  Start with '{WAKE_WORD}' to send to OpenClaw",
+                    )
+                    time.sleep(2.5)   # hold on screen so user can read it
+                    break
+
                 SCREEN.update(answer=response)
                 render("speaking", "Answering...")
                 speak(response)
@@ -1693,9 +1706,10 @@ class JarvisTUI:
                 question = listen(timeout=CONVERSATION_IDLE_TIMEOUT)
                 SCREEN.update(question=question or "")
 
-            # Silence timeout — end conversation
-            render("speaking", "Ending conversation...")
-            speak("Goodbye!")
+            else:
+                # Silence timeout — end conversation normally
+                render("speaking", "Ending conversation...")
+                speak("Goodbye!")
 
         except Exception as e:
             log_exception("conversation error", e)

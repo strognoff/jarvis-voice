@@ -28,3 +28,17 @@
 ============================================================
 2026-05-07 20:05:51.495 [INFO ] SESSION END (test)  pid=80118  v1.7.0
 ============================================================
+2026-05-08 08:24:25.959 [INFO ] Wake word 'jarvis' detected — sending: 'what is the weather'
+2026-05-08 08:24:26.003 [INFO ] Gateway error: <urlopen error [Errno 61] Connection refused>
+2026-05-08 08:24:26.005 [INFO ] OpenClaw returned empty — using local fallback
+2026-05-08 08:24:26.007 [INFO ] Wake word 'jarvis' detected — sending: 'what is the weather'
+2026-05-08 08:24:26.010 [INFO ] Gateway error: <urlopen error [Errno 61] Connection refused>
+2026-05-08 08:24:26.012 [INFO ] OpenClaw returned empty — using local fallback
+2026-05-08 08:24:26.014 [INFO ] Wake word 'jarvis' detected — sending: 'tell me a joke'
+2026-05-08 08:24:26.018 [INFO ] Gateway error: <urlopen error [Errno 61] Connection refused>
+2026-05-08 08:24:26.020 [INFO ] OpenClaw returned empty — using local fallback
+2026-05-08 08:24:26.022 [INFO ] Wake word 'jarvis' detected — sending: 'how are you'
+2026-05-08 08:24:26.025 [INFO ] Gateway error: <urlopen error [Errno 61] Connection refused>
+2026-05-08 08:24:26.027 [INFO ] OpenClaw returned empty — using local fallback
+2026-05-08 08:24:26.029 [INFO ] Wake word 'jarvis' not found — first word was 'hey' in: 'hey what is the weather'
+2026-05-08 08:24:26.032 [INFO ] Wake word 'jarvis' not found — first word was 'what' in: 'what is the weather'
