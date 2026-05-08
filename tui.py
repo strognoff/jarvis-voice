@@ -1586,19 +1586,29 @@ class VADLoop:
 
             for chunk_data in frames:
                 is_speech = False
+                rms = compute_rms(chunk_data)
                 if self.vad:
                     try:
-                        is_speech = self.vad.is_speech(chunk_data, self.sample_rate)
+                        vad_says_speech = self.vad.is_speech(chunk_data, self.sample_rate)
                     except Exception:
-                        pass
-                if compute_rms(chunk_data) > ENERGY_THRESHOLD:
-                    is_speech = True
+                        vad_says_speech = False
+                    # Require BOTH WebRTC VAD and a minimum energy floor.
+                    # WebRTC alone fires on quiet background noise (RMS=20-50).
+                    # The floor is 1/4 of ENERGY_THRESHOLD — low enough to catch
+                    # real speech but high enough to reject room hiss and TV noise.
+                    if vad_says_speech and rms > ENERGY_THRESHOLD // 4:
+                        is_speech = True
+                else:
+                    # No WebRTC VAD — fall back to pure energy threshold
+                    if rms > ENERGY_THRESHOLD:
+                        is_speech = True
 
                 if is_speech:
                     speech_frames += 1
                     silence_frames = 0
                     if not is_speaking and speech_frames >= min_speech:
                         is_speaking = True
+                        log(f"[vad] wake trigger: RMS={rms:.0f} threshold={ENERGY_THRESHOLD//4} (floor)")
                         render("wake", "Voice detected...")
                 elif is_speaking:
                     silence_frames += 1
