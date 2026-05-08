@@ -1610,41 +1610,12 @@ class JarvisTUI:
             log("VAD resumed — listening for wake")
 
     def on_wake(self):
-        """Called by VADLoop when speech+silence detected.
-
-        If REQUIRE_WAKE_WORD is True: transcribes the triggering audio and
-        checks for WAKE_WORD before entering the conversation. This means the
-        wake word itself triggers the app — energy detection is just the gate
-        to attempt transcription. If the word isn't found, returns silently to
-        idle without saying anything.
-
-        If REQUIRE_WAKE_WORD is False: any sound above threshold triggers the
-        conversation immediately (original behaviour).
-        """
+        """Called by VADLoop when speech+silence detected."""
         if self.state != "idle":
             return
         self.state = "busy"
         self._pause_vad()
         try:
-            if REQUIRE_WAKE_WORD:
-                # Transcribe the short VAD-trigger clip to check for the wake word
-                render("wake", f"Checking for '{WAKE_WORD}'...")
-                import tempfile as _tf
-                wake_wav = str(Path(_tf.gettempdir()) / "jarvis_wake_check.wav")
-                ok = _record_wav(wake_wav, WAKE_WORD_TIMEOUT)
-                if ok:
-                    text = _transcribe_wav(wake_wav)
-                    is_wake, _ = extract_question(text)
-                    log(f"Wake word check: heard={text[:80]!r} found={is_wake}")
-                else:
-                    is_wake = False
-                    log("Wake word check: recording failed")
-
-                if not is_wake:
-                    # Not the wake word — go back to idle silently
-                    log(f"Wake word '{WAKE_WORD}' not detected — returning to idle")
-                    return
-
             render("wake", "Waking up...")
             self._do_conversation()
         except Exception as e:
@@ -1655,6 +1626,18 @@ class JarvisTUI:
             self._resume_vad()
 
     def answer_question(self, question: str) -> str:
+        # Wake word gate — only applies on first-word check, not mid-conversation
+        if REQUIRE_WAKE_WORD:
+            first_word = question.strip().lower().split()[0] if question.strip() else ""
+            if first_word != WAKE_WORD:
+                msg = f"No wake word '{WAKE_WORD}' — not sending to OpenClaw"
+                log(msg)
+                SCREEN.update(status=msg)
+                return ""   # empty → conversation loop ends, back to idle
+            # Strip the wake word before sending
+            question = question.strip()[len(first_word):].strip()
+            log(f"Wake word '{WAKE_WORD}' detected — sending: {question!r}")
+
         SCREEN.update(status="Sending to OpenClaw...")
         response = send_message(SESSION_KEY, question)
         if response:
